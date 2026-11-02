@@ -1,5 +1,5 @@
 /*
- * Copyright © 2018, VideoLAN and dav1d authors
+ * Copyright © 2018, VideoLAN and txav1d authors
  * Copyright © 2018, Two Orioles, LLC
  * All rights reserved.
  *
@@ -25,7 +25,7 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-//#include "config.h"
+#include "config.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -91,7 +91,7 @@ typedef struct MuxerPriv {
 } MD5Context;
 
 static int md5_open(MD5Context *const md5, const char *const file,
-                    const Av1dPictureParameters *const p,
+                    const Txav1dPictureParameters *const p,
                     const unsigned fps[2])
 {
     if (!strcmp(file, "-")) {
@@ -192,10 +192,10 @@ static void md5_update(MD5Context *const md5, const uint8_t *data, unsigned len)
     }
 }
 
-static int md5_write(MD5Context *const md5, Av1dPicture *const p) {
+static int md5_write(MD5Context *const md5, Txav1dPicture *const p) {
     const int hbd = p->p.bpc > 8;
     const int w = p->p.w, h = p->p.h;
-    uint8_t *yptr = (uint8_t *)p->data[0];
+    uint8_t *yptr = p->data[0];
 
 #if ENDIANNESS_BIG
     if (hbd && (!md5->bswap || md5->bswap_w < p->p.w)) {
@@ -221,13 +221,13 @@ static int md5_write(MD5Context *const md5, Av1dPicture *const p) {
         yptr += p->stride[0];
     }
 
-    if (p->p.layout != AV1D_PIXEL_LAYOUT_I400) {
-        const int ss_ver = p->p.layout == AV1D_PIXEL_LAYOUT_I420;
-        const int ss_hor = p->p.layout != AV1D_PIXEL_LAYOUT_I444;
+    if (p->p.layout != TXAV1D_PIXEL_LAYOUT_I400) {
+        const int ss_ver = p->p.layout == TXAV1D_PIXEL_LAYOUT_I420;
+        const int ss_hor = p->p.layout != TXAV1D_PIXEL_LAYOUT_I444;
         const int cw = (w + ss_hor) >> ss_hor;
         const int ch = (h + ss_ver) >> ss_ver;
         for (int pl = 1; pl <= 2; pl++) {
-            uint8_t *uvptr = (uint8_t*)p->data[pl];
+            uint8_t *uvptr = p->data[pl];
 
             for (int y = 0; y < ch; y++) {
 #if ENDIANNESS_BIG
@@ -245,7 +245,7 @@ static int md5_write(MD5Context *const md5, Av1dPicture *const p) {
         }
     }
 
-    av1d_picture_unref(p);
+    txav1d_picture_unref(p);
 
     return 0;
 }
@@ -304,7 +304,7 @@ static int md5_verify(MD5Context *const md5, const char *md5_str) {
     return !!memcmp(abcd, md5->abcd, sizeof(abcd));
 }
 
-Muxer md5_muxer = {
+const Muxer md5_muxer = {
     .priv_data_size = sizeof(MD5Context),
     .name = "md5",
     .extension = "md5",

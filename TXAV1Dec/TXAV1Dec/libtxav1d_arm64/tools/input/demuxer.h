@@ -1,5 +1,5 @@
 /*
- * Copyright © 2018, VideoLAN and dav1d authors
+ * Copyright © 2018, VideoLAN and txav1d authors
  * Copyright © 2018, Two Orioles, LLC
  * All rights reserved.
  *
@@ -25,10 +25,10 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef AV1D_INPUT_DEMUXER_H
-#define AV1D_INPUT_DEMUXER_H
+#ifndef TXAV1D_INPUT_DEMUXER_H
+#define TXAV1D_INPUT_DEMUXER_H
 
-#include "av1d/data.h"
+#include "txav1d/data.h"
 
 typedef struct DemuxerPriv DemuxerPriv;
 typedef struct Demuxer {
@@ -38,9 +38,9 @@ typedef struct Demuxer {
     int (*probe)(const uint8_t *data);
     int (*open)(DemuxerPriv *ctx, const char *filename,
                 unsigned fps[2], unsigned *num_frames, unsigned timebase[2]);
-    int (*read)(DemuxerPriv *ctx, Av1dData *data);
+    int (*read)(DemuxerPriv *ctx, Txav1dData *data);
     int (*seek)(DemuxerPriv *ctx, uint64_t pts);
     void (*close)(DemuxerPriv *ctx);
 } Demuxer;
 
-#endif /* AV1D_INPUT_DEMUXER_H */
+#endif /* TXAV1D_INPUT_DEMUXER_H */

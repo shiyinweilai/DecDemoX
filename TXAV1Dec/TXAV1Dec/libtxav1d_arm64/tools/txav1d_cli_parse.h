@@ -1,5 +1,6 @@
 /*
- * Copyright © 2021, VideoLAN and dav1d authors
+ * Copyright © 2018, VideoLAN and txav1d authors
+ * Copyright © 2018, Two Orioles, LLC
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -24,22 +25,31 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef AV1D_COMMON_FRAME_H
-#define AV1D_COMMON_FRAME_H
+#ifndef TXAV1D_CLI_PARSE_H
+#define TXAV1D_CLI_PARSE_H
 
-/*
- * Checks whether Av1dFrameType == INTER || == SWITCH
- * Both are defined as odd numbers {1, 3} and therefore have the LSB set.
- * See also: AV1 spec 6.8.2
- */
-#define IS_INTER_OR_SWITCH(frame_header) \
-    ((frame_header)->frame_type & 1)
+#include "txav1d/txav1d.h"
 
-/*
- * Checks whether Av1dFrameType == KEY || == INTRA
- * See also: AV1 spec 6.8.2
- */
-#define IS_KEY_OR_INTRA(frame_header) \
-    (!IS_INTER_OR_SWITCH(frame_header))
+typedef struct {
+    const char *outputfile;
+    const char *inputfile;
+    const char *demuxer;
+    const char *muxer;
+    const char *frametimes;
+    const char *verify;
+    unsigned limit, skip;
+    int quiet;
+    enum {
+        REALTIME_DISABLE = 0,
+        REALTIME_INPUT,
+        REALTIME_CUSTOM,
+    } realtime;
+    double realtime_fps;
+    unsigned realtime_cache;
+    int neg_stride;
+} CLISettings;
 
-#endif /* AV1D_COMMON_FRAME_H */
+void parse(const int argc, char *const *const argv,
+           CLISettings *const cli_settings, Txav1dSettings *const lib_settings);
+
+#endif /* TXAV1D_CLI_PARSE_H */

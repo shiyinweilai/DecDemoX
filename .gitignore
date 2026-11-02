@@ -10,7 +10,7 @@
 .Trashes
 
 # ============================================
-# Xcode — 用户级状态（不入库，每人各不相同）
+# Xcode — 用户级状态（每人各不相同）
 # ============================================
 xcuserdata/
 *.xcuserstate
@@ -45,11 +45,10 @@ xcbuilddata/
 Intermediates.noindex/
 
 # ============================================
-# C / C++ / 编译中间文件
+# C — 编译中间文件
 # ============================================
 *.o
 *.lo
-*.lo.o
 *.i
 *.ii
 *.s
@@ -60,14 +59,9 @@ Intermediates.noindex/
 *.gcov
 *.gch
 *.pch
-*.hmap
-CMakeCache.txt
-CMakeFiles/
-cmake_install.cmake
-Makefile
-!*/CMakeLists.txt
+compile_commands.json
 
-# 注意：不要忽略 *.a —— 本工程的 av1d 静态库需要入库
+# 注意：不要忽略 *.a —— libtxav1d.a 需要入库（由 .gitattributes 走 Git LFS）
 
 # ============================================
 # 依赖管理
@@ -89,7 +83,6 @@ vendor/bundle/
 *~
 .tags
 cscope.*
-compile_commands.json
 
 # ============================================
 # 日志与临时文件
@@ -103,7 +96,7 @@ core.*
 *.rej
 
 # ============================================
-# 测试与性能数据（如使用）
+# 测试与性能数据
 # ============================================
 *.trace
 *.instruments

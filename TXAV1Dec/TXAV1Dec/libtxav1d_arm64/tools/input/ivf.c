@@ -1,5 +1,5 @@
 /*
- * Copyright © 2018, VideoLAN and dav1d authors
+ * Copyright © 2018, VideoLAN and txav1d authors
  * Copyright © 2018, Two Orioles, LLC
  * All rights reserved.
  *
@@ -25,7 +25,7 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-//#include "config.h"
+#include "config.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -150,16 +150,16 @@ static inline int ivf_read_header(IvfInputContext *const c, ptrdiff_t *const sz,
     return 0;
 }
 
-static int ivf_read(IvfInputContext *const c, Av1dData *const buf) {
+static int ivf_read(IvfInputContext *const c, Txav1dData *const buf) {
     uint8_t *ptr;
     ptrdiff_t sz;
     int64_t off;
     uint64_t ts;
     if (ivf_read_header(c, &sz, &off, &ts)) return -1;
-    if (!(ptr = av1d_data_create(buf, sz))) return -1;
+    if (!(ptr = txav1d_data_create(buf, sz))) return -1;
     if (fread(ptr, sz, 1, c->f) != 1) {
         fprintf(stderr, "Failed to read frame data: %s\n", strerror(errno));
-        av1d_data_unref(buf);
+        txav1d_data_unref(buf);
         return -1;
     }
     buf->m.offset = off;
@@ -191,7 +191,7 @@ static void ivf_close(IvfInputContext *const c) {
     fclose(c->f);
 }
 
-Demuxer ivf_demuxer = {
+const Demuxer ivf_demuxer = {
     .priv_data_size = sizeof(IvfInputContext),
     .name = "ivf",
     .probe = ivf_probe,

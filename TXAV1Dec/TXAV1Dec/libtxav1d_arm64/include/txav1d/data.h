@@ -1,5 +1,5 @@
 /*
- * Copyright © 2018, VideoLAN and dav1d authors
+ * Copyright © 2018, VideoLAN and txav1d authors
  * Copyright © 2018, Two Orioles, LLC
  * All rights reserved.
  *
@@ -25,24 +25,23 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef AV1D_DATA_H
-#define AV1D_DATA_H
-
-#ifdef __cplusplus
-extern "C" {
-#endif
+#ifndef TXAV1D_DATA_H
+#define TXAV1D_DATA_H
 
 #include <stddef.h>
 #include <stdint.h>
 
 #include "common.h"
 
-typedef struct Av1dData {
+#ifdef __cplusplus
+extern "C" {
+#endif
+typedef struct Txav1dData {
     const uint8_t *data; ///< data pointer
     size_t sz; ///< data size
-    struct Av1dRef *ref; ///< allocation origin
-    Av1dDataProps m; ///< user provided metadata passed to the output picture
-} Av1dData;
+    struct Txav1dRef *ref; ///< allocation origin
+    Txav1dDataProps m; ///< user provided metadata passed to the output picture
+} Txav1dData;
 
 /**
  * Allocate data.
@@ -52,7 +51,7 @@ typedef struct Av1dData {
  *
  * @return Pointer to the allocated buffer on success. NULL on error.
  */
-AV1D_API uint8_t * av1d_data_create(Av1dData *data, size_t sz);
+TXAV1D_API uint8_t * txav1d_data_create(Txav1dData *data, size_t sz);
 
 /**
  * Wrap an existing data array.
@@ -66,9 +65,9 @@ AV1D_API uint8_t * av1d_data_create(Av1dData *data, size_t sz);
  *                      be the $cookie input argument to this function.
  * @param        cookie Opaque parameter passed to free_callback().
  *
- * @return 0 on success. A negative AV1D_ERR value on error.
+ * @return 0 on success. A negative TXAV1D_ERR value on error.
  */
-AV1D_API int av1d_data_wrap(Av1dData *data, const uint8_t *buf, size_t sz,
+TXAV1D_API int txav1d_data_wrap(Txav1dData *data, const uint8_t *buf, size_t sz,
                               void (*free_callback)(const uint8_t *buf, void *cookie),
                               void *cookie);
 
@@ -91,9 +90,9 @@ AV1D_API int av1d_data_wrap(Av1dData *data, const uint8_t *buf, size_t sz,
  *                      function.
  * @param        cookie Opaque parameter passed to $free_callback.
  *
- * @return 0 on success. A negative AV1D_ERR value on error.
+ * @return 0 on success. A negative TXAV1D_ERR value on error.
  */
-AV1D_API int av1d_data_wrap_user_data(Av1dData *data,
+TXAV1D_API int txav1d_data_wrap_user_data(Txav1dData *data,
                                         const uint8_t *user_data,
                                         void (*free_callback)(const uint8_t *user_data,
                                                               void *cookie),
@@ -103,15 +102,14 @@ AV1D_API int av1d_data_wrap_user_data(Av1dData *data,
  * Free the data reference.
  *
  * The reference count for data->m.user_data will be decremented (if it has been
- * initialized with av1d_data_wrap_user_data). The $data object will be memset
+ * initialized with txav1d_data_wrap_user_data). The $data object will be memset
  * to 0.
  *
  * @param data Input context.
  */
-AV1D_API void av1d_data_unref(Av1dData *data);
+TXAV1D_API void txav1d_data_unref(Txav1dData *data);
 
-# ifdef __cplusplus
-}
-# endif
-
-#endif /* AV1D_DATA_H */
+#ifdef __cplusplus
+} /* extern "C" */
+#endif
+#endif /* TXAV1D_DATA_H */

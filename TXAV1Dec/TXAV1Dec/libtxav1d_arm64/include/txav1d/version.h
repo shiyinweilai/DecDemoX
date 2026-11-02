@@ -1,6 +1,5 @@
 /*
- * Copyright © 2018, VideoLAN and dav1d authors
- * Copyright © 2018, Two Orioles, LLC
+ * Copyright © 2019, VideoLAN and txav1d authors
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -25,35 +24,11 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef AV1D_COMMON_VALIDATE_H
-#define AV1D_COMMON_VALIDATE_H
+#ifndef TXAV1D_VERSION_H
+#define TXAV1D_VERSION_H
 
-#include <stdio.h>
-#include <stdlib.h>
+#define TXAV1D_API_VERSION_MAJOR 1
+#define TXAV1D_API_VERSION_MINOR 4
+#define TXAV1D_API_VERSION_PATCH 2
 
-#if defined(NDEBUG)
-#define debug_abort()
-#else
-#define debug_abort abort
-#endif
-
-#define validate_input_or_ret_with_msg(x, r, ...) \
-    if (!(x)) { \
-        fprintf(stderr, "Input validation check \'%s\' failed in %s!\n", \
-                #x, __func__); \
-        fprintf(stderr, __VA_ARGS__); \
-        debug_abort(); \
-        return r; \
-    }
-
-#define validate_input_or_ret(x, r) \
-    if (!(x)) { \
-        fprintf(stderr, "Input validation check \'%s\' failed in %s!\n", \
-                #x, __func__); \
-        debug_abort(); \
-        return r; \
-    }
-
-#define validate_input(x) validate_input_or_ret(x, )
-
-#endif /* AV1D_COMMON_VALIDATE_H */
+#endif /* TXAV1D_VERSION_H */

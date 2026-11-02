@@ -1,5 +1,5 @@
 /*
- * Copyright © 2018, VideoLAN and dav1d authors
+ * Copyright © 2018, VideoLAN and txav1d authors
  * Copyright © 2018, Two Orioles, LLC
  * All rights reserved.
  *
@@ -25,8 +25,8 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef AV1D_COMMON_INTOPS_H
-#define AV1D_COMMON_INTOPS_H
+#ifndef TXAV1D_COMMON_INTOPS_H
+#define TXAV1D_COMMON_INTOPS_H
 
 #include <stdint.h>
 
@@ -65,11 +65,11 @@ static inline int apply_sign64(const int v, const int64_t s) {
 }
 
 static inline int ulog2(const unsigned v) {
-    return 31 - clz(v);
+    return 31 ^ clz(v);
 }
 
 static inline int u64log2(const uint64_t v) {
-    return 63 - clzll(v);
+    return 63 ^ clzll(v);
 }
 
 static inline unsigned inv_recenter(const unsigned r, const unsigned v) {
@@ -81,6 +81,6 @@ static inline unsigned inv_recenter(const unsigned r, const unsigned v) {
         return r - ((v + 1) >> 1);
 }
 
-#define AV1D_ABS_DIFF(a, b) ((a) < (b) ? ((b) - (a)) : ((a) - (b)))
+#define TXAV1D_ABS_DIFF(a, b) ((a) < (b) ? ((b) - (a)) : ((a) - (b)))
 
-#endif /* AV1D_COMMON_INTOPS_H */
+#endif /* TXAV1D_COMMON_INTOPS_H */

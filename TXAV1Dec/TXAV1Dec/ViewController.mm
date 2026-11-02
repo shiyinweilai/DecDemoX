@@ -6,8 +6,8 @@
 //
 
 #import "ViewController.h"
-#import "av1d_core.h"
-#import "txav1d.h"
+#import "txav1d_core.h"
+#import "source/txav1d.h"
 
 #define ScreenWidth [UIScreen mainScreen].bounds.size.width
 #define ScreenHeight [UIScreen mainScreen].bounds.size.height

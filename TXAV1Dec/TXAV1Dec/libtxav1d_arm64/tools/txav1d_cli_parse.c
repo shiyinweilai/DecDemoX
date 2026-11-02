@@ -1,5 +1,5 @@
 /*
- * Copyright © 2018, VideoLAN and dav1d authors
+ * Copyright © 2018, VideoLAN and txav1d authors
  * Copyright © 2018, Two Orioles, LLC
  * All rights reserved.
  *
@@ -25,8 +25,8 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-//#include "config.h"
-//#include "cli_config.h"
+#include "config.h"
+#include "cli_config.h"
 
 #include <getopt.h>
 #include <limits.h>
@@ -35,12 +35,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef HAVE_UNISTD_H
+#if HAVE_UNISTD_H
 # include <unistd.h>
 #endif
 
-#include "av1d_cli_parse.h"
-#include "common/cpu.h"
+#include "txav1d_cli_parse.h"
+#include "src/cpu.h"
 
 static const char short_opts[] = "i:o:vql:s:";
 
@@ -58,31 +58,41 @@ enum {
     ARG_OPPOINT,
     ARG_ALL_LAYERS,
     ARG_SIZE_LIMIT,
+    ARG_STRICT_STD_COMPLIANCE,
     ARG_CPU_MASK,
+    ARG_NEG_STRIDE,
+    ARG_OUTPUT_INVISIBLE,
+    ARG_INLOOP_FILTERS,
+    ARG_DECODE_FRAME_TYPE,
 };
 
 static const struct option long_opts[] = {
-    { "input",          1, NULL, 'i' },
-    { "output",         1, NULL, 'o' },
-    { "quiet",          0, NULL, 'q' },
-    { "demuxer",        1, NULL, ARG_DEMUXER },
-    { "muxer",          1, NULL, ARG_MUXER },
-    { "version",        0, NULL, 'v' },
-    { "frametimes",     1, NULL, ARG_FRAME_TIMES },
-    { "limit",          1, NULL, 'l' },
-    { "skip",           1, NULL, 's' },
-    { "realtime",       2, NULL, ARG_REALTIME },
-    { "realtimecache",  1, NULL, ARG_REALTIME_CACHE },
-    { "threads",        1, NULL, ARG_THREADS },
-    { "framedelay",     1, NULL, ARG_FRAME_DELAY },
-    { "wpp",            1, NULL, ARG_WPP },
-    { "verify",         1, NULL, ARG_VERIFY },
-    { "filmgrain",      1, NULL, ARG_FILM_GRAIN },
-    { "oppoint",        1, NULL, ARG_OPPOINT },
-    { "alllayers",      1, NULL, ARG_ALL_LAYERS },
-    { "sizelimit",      1, NULL, ARG_SIZE_LIMIT },
-    { "cpumask",        1, NULL, ARG_CPU_MASK },
-    { NULL,             0, NULL, 0 },
+    {"input", 1, NULL, 'i'},
+    {"output", 1, NULL, 'o'},
+    {"quiet", 0, NULL, 'q'},
+    {"demuxer", 1, NULL, ARG_DEMUXER},
+    {"muxer", 1, NULL, ARG_MUXER},
+    {"version", 0, NULL, 'v'},
+    {"frametimes", 1, NULL, ARG_FRAME_TIMES},
+    {"limit", 1, NULL, 'l'},
+    {"skip", 1, NULL, 's'},
+    {"realtime", 2, NULL, ARG_REALTIME},
+    {"realtimecache", 1, NULL, ARG_REALTIME_CACHE},
+    {"threads", 1, NULL, ARG_THREADS},
+    {"framedelay", 1, NULL, ARG_FRAME_DELAY},
+    {"wpp", 1, NULL, ARG_WPP},
+    {"verify", 1, NULL, ARG_VERIFY},
+    {"filmgrain", 1, NULL, ARG_FILM_GRAIN},
+    {"oppoint", 1, NULL, ARG_OPPOINT},
+    {"alllayers", 1, NULL, ARG_ALL_LAYERS},
+    {"sizelimit", 1, NULL, ARG_SIZE_LIMIT},
+    {"strict", 1, NULL, ARG_STRICT_STD_COMPLIANCE},
+    {"cpumask", 1, NULL, ARG_CPU_MASK},
+    {"negstride", 0, NULL, ARG_NEG_STRIDE},
+    {"outputinvisible", 1, NULL, ARG_OUTPUT_INVISIBLE},
+    {"inloopfilters", 1, NULL, ARG_INLOOP_FILTERS},
+    {"decodeframetype", 1, NULL, ARG_DECODE_FRAME_TYPE},
+    {NULL, 0, NULL, 0},
 };
 
 #if HAVE_XXHASH_H
@@ -92,9 +102,13 @@ static const struct option long_opts[] = {
 #endif
 
 #if ARCH_AARCH64 || ARCH_ARM
-#define ALLOWED_CPU_MASKS " or 'neon'"
+#define ALLOWED_CPU_MASKS ", 'neon', 'dotprod' or 'i8mm'"
+#elif ARCH_LOONGARCH
+#define ALLOWED_CPU_MASKS ", 'lsx' or 'lasx'"
 #elif ARCH_PPC64LE
-#define ALLOWED_CPU_MASKS " or 'vsx'"
+#define ALLOWED_CPU_MASKS ", 'vsx' or 'pwr9'"
+#elif ARCH_RISCV
+#define ALLOWED_CPU_MASKS " or 'rvv'"
 #elif ARCH_X86
 #define ALLOWED_CPU_MASKS \
     ", 'sse2', 'ssse3', 'sse41', 'avx2' or 'avx512icl'"
@@ -114,9 +128,10 @@ static void usage(const char *const app, const char *const reason, ...) {
     fprintf(stderr, "Usage: %s [options]\n\n", app);
     fprintf(stderr, "Supported options:\n"
             " --input/-i $file:     input file\n"
-            " --output/-o $file:    output file\n"
+            " --output/-o $file:    output file (%%n, %%w or %%h will be filled in for per-frame files)\n"
             " --demuxer $name:      force demuxer type ('ivf', 'section5' or 'annexb'; default: detect from content)\n"
             " --muxer $name:        force muxer type (" AVAILABLE_MUXERS "; default: detect from extension)\n"
+            "                       use 'frame' as prefix to write per-frame files; if filename contains %%n, will default to writing per-frame files\n"
             " --quiet/-q:           disable status messages\n"
             " --frametimes $file:   dump frame times to file\n"
             " --limit/-l $num:      stop decoding after $num frames\n"
@@ -124,15 +139,23 @@ static void usage(const char *const app, const char *const reason, ...) {
             " --realtime [$fract]:  limit framerate, optional argument to override input framerate\n"
             " --realtimecache $num: set the size of the cache in realtime mode (default: 0)\n"
             " --version/-v:         print version and exit\n"
-            " --threads $num:       number of threads (default: 1)\n"
-            " --framedelay $num:    maximum frame delay, capped at $threads (default: 8);\n"
+            " --threads $num:       number of threads (default: 0)\n"
+            " --framedelay $num:    maximum frame delay, capped at $threads (default: 0);\n"
             "                       set to 1 for low-latency decoding\n"
             " --filmgrain $num:     enable film grain application (default: 1, except if muxer is md5 or xxh3)\n"
             " --oppoint $num:       select an operating point of a scalable AV1 bitstream (0 - 31)\n"
             " --alllayers $num:     output all spatial layers of a scalable AV1 bitstream (default: 1)\n"
             " --sizelimit $num:     stop decoding if the frame size exceeds the specified limit\n"
+            " --strict $num:        whether to abort decoding on standard compliance violations\n"
+            "                       that don't affect bitstream decoding (default: 1)\n"
             " --verify $md5:        verify decoded md5. implies --muxer md5, no output\n"
-            " --cpumask $mask:      restrict permitted CPU instruction sets (0" ALLOWED_CPU_MASKS "; default: -1)\n");
+            " --cpumask $mask:      restrict permitted CPU instruction sets (0" ALLOWED_CPU_MASKS "; default: -1)\n"
+            " --negstride:          use negative picture strides\n"
+            "                       this is mostly meant as a developer option\n"
+            " --outputinvisible $num: whether to output invisible (alt-ref) frames (default: 0)\n"
+            " --inloopfilters $str: which in-loop filters to enable (none, (no)deblock, (no)cdef, (no)restoration or all; default: all)\n"
+            " --decodeframetype $str: which frame types to decode (reference, intra, key or all; default: all)\n"
+            );
     exit(1);
 }
 
@@ -160,7 +183,7 @@ static unsigned parse_unsigned(const char *const optarg, const int option,
                                const char *const app)
 {
     char *end;
-    const unsigned res = (unsigned) strtoul(optarg, &end, 0);
+    const unsigned res = (unsigned)strtoul(optarg, &end, 0);
     if (*end || end == optarg) error(app, optarg, option, "an integer");
     return res;
 }
@@ -187,31 +210,76 @@ typedef struct EnumParseTable {
 } EnumParseTable;
 
 #if ARCH_X86
+enum CpuMask
+{
+    X86_CPU_MASK_SSE2  = TXAV1D_X86_CPU_FLAG_SSE2,
+    X86_CPU_MASK_SSSE3 = TXAV1D_X86_CPU_FLAG_SSSE3 | X86_CPU_MASK_SSE2,
+    X86_CPU_MASK_SSE41 = TXAV1D_X86_CPU_FLAG_SSE41 | X86_CPU_MASK_SSSE3,
+    X86_CPU_MASK_AVX2  = TXAV1D_X86_CPU_FLAG_AVX2 | X86_CPU_MASK_SSE41,
+    X86_CPU_MASK_AVX512ICL = TXAV1D_X86_CPU_FLAG_AVX512ICL | X86_CPU_MASK_AVX2,
+};
+#elif ARCH_AARCH64 || ARCH_ARM
 enum CpuMask {
-    X86_CPU_MASK_SSE2      = AV1D_X86_CPU_FLAG_SSE2,
-    X86_CPU_MASK_SSSE3     = AV1D_X86_CPU_FLAG_SSSE3     | X86_CPU_MASK_SSE2,
-    X86_CPU_MASK_SSE41     = AV1D_X86_CPU_FLAG_SSE41     | X86_CPU_MASK_SSSE3,
-    X86_CPU_MASK_AVX2      = AV1D_X86_CPU_FLAG_AVX2      | X86_CPU_MASK_SSE41,
-    X86_CPU_MASK_AVX512ICL = AV1D_X86_CPU_FLAG_AVX512ICL | X86_CPU_MASK_AVX2,
+    ARM_CPU_MASK_NEON      = TXAV1D_ARM_CPU_FLAG_NEON,
+    ARM_CPU_MASK_DOTPROD   = TXAV1D_ARM_CPU_FLAG_DOTPROD | ARM_CPU_MASK_NEON,
+    ARM_CPU_MASK_I8MM      = TXAV1D_ARM_CPU_FLAG_I8MM    | ARM_CPU_MASK_DOTPROD,
+#if ARCH_AARCH64
+    ARM_CPU_MASK_SVE       = TXAV1D_ARM_CPU_FLAG_SVE     | ARM_CPU_MASK_NEON,
+    ARM_CPU_MASK_SVE2      = TXAV1D_ARM_CPU_FLAG_SVE2    | ARM_CPU_MASK_SVE | ARM_CPU_MASK_DOTPROD,
+#endif
 };
 #endif
 
+#if ARCH_PPC64LE
+enum CpuMask {
+    PPC_CPU_MASK_VSX       = TXAV1D_PPC_CPU_FLAG_VSX,
+    PPC_CPU_MASK_PWR9      = TXAV1D_PPC_CPU_FLAG_VSX | TXAV1D_PPC_CPU_FLAG_PWR9,
+};
+#endif
 static const EnumParseTable cpu_mask_tbl[] = {
 #if ARCH_AARCH64 || ARCH_ARM
-    { "neon", AV1D_ARM_CPU_FLAG_NEON },
+    { "neon",    ARM_CPU_MASK_NEON },
+    { "dotprod", ARM_CPU_MASK_DOTPROD },
+    { "i8mm",    ARM_CPU_MASK_I8MM },
+#if ARCH_AARCH64
+    { "sve",     ARM_CPU_MASK_SVE },
+    { "sve2",    ARM_CPU_MASK_SVE2 },
+#endif /* ARCH_AARCH64 */
+#elif ARCH_LOONGARCH
+    { "lsx", TXAV1D_LOONGARCH_CPU_FLAG_LSX },
+    { "lasx", TXAV1D_LOONGARCH_CPU_FLAG_LASX },
 #elif ARCH_PPC64LE
-    { "vsx", AV1D_PPC_CPU_FLAG_VSX },
+    { "vsx",  PPC_CPU_MASK_VSX },
+    { "pwr9", PPC_CPU_MASK_PWR9 },
+#elif ARCH_RISCV
+    { "rvv", TXAV1D_RISCV_CPU_FLAG_V },
 #elif ARCH_X86
-    { "sse2",      X86_CPU_MASK_SSE2 },
-    { "ssse3",     X86_CPU_MASK_SSSE3 },
-    { "sse41",     X86_CPU_MASK_SSE41 },
-    { "avx2",      X86_CPU_MASK_AVX2 },
-    { "avx512icl", X86_CPU_MASK_AVX512ICL },
+    {"sse2", X86_CPU_MASK_SSE2},
+    {"ssse3", X86_CPU_MASK_SSSE3},
+    {"sse41", X86_CPU_MASK_SSE41},
+    {"avx2", X86_CPU_MASK_AVX2},
+    {"avx512icl", X86_CPU_MASK_AVX512ICL},
 #endif
-    { "none",      0 },
+    {"none", 0},
 };
 
-#define ARRAY_SIZE(n) (sizeof(n)/sizeof(*(n)))
+static const EnumParseTable inloop_filters_tbl[] = {
+    { "none",          TXAV1D_INLOOPFILTER_NONE },
+    { "deblock",       TXAV1D_INLOOPFILTER_DEBLOCK },
+    { "nodeblock",     TXAV1D_INLOOPFILTER_ALL - TXAV1D_INLOOPFILTER_DEBLOCK },
+    { "cdef",          TXAV1D_INLOOPFILTER_CDEF },
+    { "nocdef",        TXAV1D_INLOOPFILTER_ALL - TXAV1D_INLOOPFILTER_CDEF },
+    { "restoration",   TXAV1D_INLOOPFILTER_RESTORATION },
+    { "norestoration", TXAV1D_INLOOPFILTER_ALL - TXAV1D_INLOOPFILTER_RESTORATION },
+    { "all",           TXAV1D_INLOOPFILTER_ALL },
+};
+static const EnumParseTable decode_frame_type_tbl[] = {
+    { "all",           TXAV1D_DECODEFRAMETYPE_ALL },
+    { "reference",     TXAV1D_DECODEFRAMETYPE_REFERENCE },
+    { "intra",         TXAV1D_DECODEFRAMETYPE_INTRA },
+    { "key",           TXAV1D_DECODEFRAMETYPE_KEY },
+};
+#define ARRAY_SIZE(n) (sizeof(n) / sizeof(*(n)))
 
 static unsigned parse_enum(char *optarg, const EnumParseTable *const tbl,
                            const int tbl_sz, const int option, const char *app)
@@ -235,9 +303,9 @@ static unsigned parse_enum(char *optarg, const EnumParseTable *const tbl,
     char *end;
     unsigned res;
     if (!strncmp(optarg, "0x", 2)) {
-        res = (unsigned) strtoul(&optarg[2], &end, 16);
+        res = (unsigned)strtoul(&optarg[2], &end, 16);
     } else {
-        res = (unsigned) strtoul(optarg, &end, 0);
+        res = (unsigned)strtoul(optarg, &end, 0);
     }
 
     if (*end || end == optarg) {
@@ -249,12 +317,13 @@ static unsigned parse_enum(char *optarg, const EnumParseTable *const tbl,
 }
 
 void parse(const int argc, char *const *const argv,
-           CLISettings *const cli_settings, Av1dSettings *const lib_settings)
+           CLISettings *const cli_settings, Txav1dSettings *const lib_settings)
 {
     int o;
 
     memset(cli_settings, 0, sizeof(*cli_settings));
-    av1d_default_settings(lib_settings);
+    txav1d_default_settings(lib_settings);
+    lib_settings->strict_std_compliance = 1; // override library default
     int grain_specified = 0;
 
     while ((o = getopt_long(argc, argv, short_opts, long_opts, NULL)) != -1) {
@@ -292,8 +361,8 @@ void parse(const int argc, char *const *const argv,
                 optarg = argv[optind];
                 optind++;
             }
-            cli_settings->realtime = realtime_enum(1 + parse_optional_fraction(optarg,
-                ARG_REALTIME, argv[0], &cli_settings->realtime_fps));
+            cli_settings->realtime = 1 + parse_optional_fraction(optarg,
+                                                                 ARG_REALTIME, argv[0], &cli_settings->realtime_fps);
             break;
         case ARG_REALTIME_CACHE:
             cli_settings->realtime_cache =
@@ -334,15 +403,36 @@ void parse(const int argc, char *const *const argv,
                 res *= strtoul((arg = end + 1), &end, 0);
             if (*end || end == arg || res >= UINT_MAX)
                 error(argv[0], optarg, ARG_SIZE_LIMIT, "an integer or dimension");
-            lib_settings->frame_size_limit = (unsigned) res;
+            lib_settings->frame_size_limit = (unsigned)res;
             break;
         }
+        case ARG_STRICT_STD_COMPLIANCE:
+            lib_settings->strict_std_compliance =
+                parse_unsigned(optarg, ARG_STRICT_STD_COMPLIANCE, argv[0]);
+            break;
         case 'v':
-            fprintf(stderr, "%s\n", av1d_version());
+            fprintf(stderr, "%s\n", txav1d_version());
             exit(0);
         case ARG_CPU_MASK:
-            av1d_set_cpu_flags_mask(parse_enum(optarg, cpu_mask_tbl, ARRAY_SIZE(cpu_mask_tbl),
-                                                ARG_CPU_MASK, argv[0]));
+            txav1d_set_cpu_flags_mask(parse_enum(optarg, cpu_mask_tbl, ARRAY_SIZE(cpu_mask_tbl),
+                                                 ARG_CPU_MASK, argv[0]));
+            break;
+        case ARG_NEG_STRIDE:
+            cli_settings->neg_stride = 1;
+            break;
+        case ARG_OUTPUT_INVISIBLE:
+            lib_settings->output_invisible_frames =
+                !!parse_unsigned(optarg, ARG_OUTPUT_INVISIBLE, argv[0]);
+            break;
+        case ARG_INLOOP_FILTERS:
+            lib_settings->inloop_filters =
+                parse_enum(optarg, inloop_filters_tbl,
+                           ARRAY_SIZE(inloop_filters_tbl),ARG_INLOOP_FILTERS, argv[0]);
+            break;
+        case ARG_DECODE_FRAME_TYPE:
+            lib_settings->decode_frame_type =
+                parse_enum(optarg, decode_frame_type_tbl,
+                           ARRAY_SIZE(decode_frame_type_tbl), ARG_DECODE_FRAME_TYPE, argv[0]);
             break;
         default:
             usage(argv[0], NULL);
@@ -351,7 +441,8 @@ void parse(const int argc, char *const *const argv,
 
     if (optind < argc)
         usage(argv[0], "Extra/unused arguments found, e.g. '%s'\n", argv[optind]);
-    if (cli_settings->verify) {
+    if (cli_settings->verify)
+    {
         if (cli_settings->outputfile)
             usage(argv[0], "Verification (--verify) requires output file (-o/--output) to not set");
         if (cli_settings->muxer && strcmp(cli_settings->muxer, "md5") &&
@@ -367,7 +458,7 @@ void parse(const int argc, char *const *const argv,
 
     if (!grain_specified && cli_settings->muxer &&
         (!strcmp(cli_settings->muxer, "md5") ||
-        !strcmp(cli_settings->muxer, "xxh3")))
+         !strcmp(cli_settings->muxer, "xxh3")))
     {
         lib_settings->apply_grain = 0;
     }
@@ -379,5 +470,4 @@ void parse(const int argc, char *const *const argv,
     {
         usage(argv[0], "Output file (-o/--output) is required");
     }
-    optind = 0;
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright © 2018, VideoLAN and dav1d authors
+ * Copyright © 2018, VideoLAN and txav1d authors
  * Copyright © 2018, Two Orioles, LLC
  * All rights reserved.
  *
@@ -25,24 +25,23 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-//#include "config.h"
-//#include "vcs_version.h"
-//#include "cli_config.h"
+#include "config.h"
+#include "vcs_version.h"
+#include "cli_config.h"
 
+#include <assert.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <math.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
-
-# include <unistd.h>
-
-#ifdef HAVE_UNISTD_H
+#if HAVE_UNISTD_H
 # include <unistd.h>
 #endif
-#ifdef HAVE_IO_H
+#if HAVE_IO_H
 # include <io.h>
 #endif
 #ifdef _WIN32
@@ -52,15 +51,15 @@
 #include <mach/mach_time.h>
 #endif
 
-#include "av1d/av1d.h"
+#include "txav1d/txav1d.h"
 
 #include "input/input.h"
 
 #include "output/output.h"
 
-#include "av1d_cli_parse.h"
+#include "txav1d_cli_parse.h"
 
-#include "av1d_core.h"
+#include "txav1d_core.h"
 
 static uint64_t get_time_nanos(void) {
 #ifdef _WIN32
@@ -71,7 +70,7 @@ static uint64_t get_time_nanos(void) {
     uint64_t seconds = t.QuadPart / frequency.QuadPart;
     uint64_t fractions = t.QuadPart % frequency.QuadPart;
     return 1000000000 * seconds + 1000000000 * fractions / frequency.QuadPart;
-#elif defined(HAVE_CLOCK_GETTIME)
+#elif HAVE_CLOCK_GETTIME
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return 1000000000ULL * ts.tv_sec + ts.tv_nsec;
@@ -79,6 +78,8 @@ static uint64_t get_time_nanos(void) {
     mach_timebase_info_data_t info;
     mach_timebase_info(&info);
     return mach_absolute_time() * info.numer / info.denom;
+#else
+    return 0;
 #endif
 }
 
@@ -144,23 +145,79 @@ static void print_stats(const int istty, const unsigned n, const unsigned num,
     fputs(buf, stderr);
 }
 
+static int picture_alloc(Txav1dPicture *const p, void *const _) {
+    const int hbd = p->p.bpc > 8;
+    const int aligned_w = (p->p.w + 127) & ~127;
+    const int aligned_h = (p->p.h + 127) & ~127;
+    const int has_chroma = p->p.layout != TXAV1D_PIXEL_LAYOUT_I400;
+    const int ss_ver = p->p.layout == TXAV1D_PIXEL_LAYOUT_I420;
+    const int ss_hor = p->p.layout != TXAV1D_PIXEL_LAYOUT_I444;
+    ptrdiff_t y_stride = aligned_w << hbd;
+    ptrdiff_t uv_stride = has_chroma ? y_stride >> ss_hor : 0;
+    /* Due to how mapping of addresses to sets works in most L1 and L2 cache
+     * implementations, strides of multiples of certain power-of-two numbers
+     * may cause multiple rows of the same superblock to map to the same set,
+     * causing evictions of previous rows resulting in a reduction in cache
+     * hit rate. Avoid that by slightly padding the stride when necessary. */
+    if (!(y_stride & 1023))
+        y_stride += TXAV1D_PICTURE_ALIGNMENT;
+    if (!(uv_stride & 1023) && has_chroma)
+        uv_stride += TXAV1D_PICTURE_ALIGNMENT;
+    p->stride[0] = -y_stride;
+    p->stride[1] = -uv_stride;
+    const size_t y_sz = y_stride * aligned_h;
+    const size_t uv_sz = uv_stride * (aligned_h >> ss_ver);
+    const size_t pic_size = y_sz + 2 * uv_sz;
+
+    uint8_t *const buf = malloc(pic_size + TXAV1D_PICTURE_ALIGNMENT * 2);
+    if (!buf) return TXAV1D_ERR(ENOMEM);
+    p->allocator_data = buf;
+
+    const ptrdiff_t align_m1 = TXAV1D_PICTURE_ALIGNMENT - 1;
+    uint8_t *const data = (uint8_t *)(((ptrdiff_t)buf + align_m1) & ~align_m1);
+    p->data[0] = data + y_sz - y_stride;
+    p->data[1] = has_chroma ? data + y_sz + uv_sz * 1 - uv_stride : NULL;
+    p->data[2] = has_chroma ? data + y_sz + uv_sz * 2 - uv_stride : NULL;
+
+    return 0;
+}
+
+static void picture_release(Txav1dPicture *const p, void *const _) {
+    free(p->allocator_data);
+}
+
+static volatile sig_atomic_t signal_terminate;
+static void signal_handler(const int s) {
+    signal_terminate = 1;
+}
+
 int txav1d_lanuch(const int argc, char *const *const argv) {
     const int istty = isatty(fileno(stderr));
     int res = 0;
     CLISettings cli_settings;
-    Av1dSettings lib_settings;
+    Txav1dSettings lib_settings;
     DemuxerContext *in;
     MuxerContext *out = NULL;
-    Av1dPicture p;
-    Av1dContext *c;
-    Av1dData data;
-    unsigned n_out = 0, total, fps[2], timebase[2];
-    uint64_t nspf, tfirst, elapsed;
+    Txav1dPicture p;
+    Txav1dContext *c;
+    Txav1dData data;
+    unsigned n_out = 0, total = 0, fps[2], timebase[2];
+    uint64_t nspf, tfirst, elapsed = 0;
     double i_fps;
     FILE *frametimes = NULL;
-    int totalFrames = 0;
+    const char *version = txav1d_version();
+
+    if (strcmp(version, TXAV1D_VERSION)) {
+        fprintf(stderr, "Version mismatch (library: %s, executable: %s)\n",
+                version, TXAV1D_VERSION);
+        return EXIT_FAILURE;
+    }
+
     parse(argc, argv, &cli_settings, &lib_settings);
-    fprintf(stderr, "av1d %s - by Tencent\n", av1d_version());
+    if (cli_settings.neg_stride) {
+        lib_settings.allocator.alloc_picture_callback = picture_alloc;
+        lib_settings.allocator.release_picture_callback = picture_release;
+    }
 
     if ((res = input_open(&in, cli_settings.demuxer,
                           cli_settings.inputfile,
@@ -168,24 +225,24 @@ int txav1d_lanuch(const int argc, char *const *const argv) {
     {
         return EXIT_FAILURE;
     }
-    totalFrames = total;
+    const int total_frames = (int)total;
 
     for (unsigned i = 0; i <= cli_settings.skip; i++) {
         if ((res = input_read(in, &data)) < 0) {
             input_close(in);
             return EXIT_FAILURE;
         }
-        if (i < cli_settings.skip) av1d_data_unref(&data);
+        if (i < cli_settings.skip) txav1d_data_unref(&data);
     }
 
     if (!cli_settings.quiet)
-        fprintf(stderr, "av1d %s - by Tencent\n", av1d_version());
+        fprintf(stderr, "txav1d %s - by Tencent\n", txav1d_version());
 
     // skip frames until a sequence header is found
     if (cli_settings.skip) {
-        Av1dSequenceHeader seq;
+        Txav1dSequenceHeader seq;
         unsigned seq_skip = 0;
-        while (av1d_parse_sequence_header(&seq, data.data, data.sz)) {
+        while (txav1d_parse_sequence_header(&seq, data.data, data.sz)) {
             if ((res = input_read(in, &data)) < 0) {
                 input_close(in);
                 return EXIT_FAILURE;
@@ -201,7 +258,7 @@ int txav1d_lanuch(const int argc, char *const *const argv) {
     if (cli_settings.limit != 0 && cli_settings.limit < total)
         total = cli_settings.limit;
 
-    if ((res = av1d_open(&c, &lib_settings)))
+    if ((res = txav1d_open(&c, &lib_settings)))
         return EXIT_FAILURE;
 
     if (cli_settings.frametimes)
@@ -221,22 +278,36 @@ int txav1d_lanuch(const int argc, char *const *const argv) {
     }
     tfirst = get_time_nanos();
 
+#ifdef _WIN32
+    signal(SIGINT,  signal_handler);
+    signal(SIGTERM, signal_handler);
+#else
+    static const struct sigaction sa = {
+        .sa_handler = signal_handler,
+        .sa_flags = SA_RESETHAND,
+    };
+    sigaction(SIGINT,  &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+#endif
+
     do {
+        if ((res = signal_terminate)) break;
+
         memset(&p, 0, sizeof(p));
-        if ((res = av1d_send_data(c, &data)) < 0) {
-            if (res != AV1D_ERR(EAGAIN)) {
-                av1d_data_unref(&data);
+        if ((res = txav1d_send_data(c, &data)) < 0) {
+            if (res != TXAV1D_ERR(EAGAIN)) {
+                txav1d_data_unref(&data);
                 fprintf(stderr, "Error decoding frame: %s\n",
-                        strerror(AV1D_ERR(res)));
-                break;
+                        strerror(TXAV1D_ERR(res)));
+                if (res != TXAV1D_ERR(EINVAL)) break;
             }
         }
 
-        if ((res = av1d_get_picture(c, &p)) < 0) {
-            if (res != AV1D_ERR(EAGAIN)) {
+        if ((res = txav1d_get_picture(c, &p)) < 0) {
+            if (res != TXAV1D_ERR(EAGAIN)) {
                 fprintf(stderr, "Error decoding frame: %s\n",
-                        strerror(AV1D_ERR(res)));
-                break;
+                        strerror(TXAV1D_ERR(res)));
+                if (res != TXAV1D_ERR(EINVAL)) break;
             }
             res = 0;
         } else {
@@ -246,6 +317,8 @@ int txav1d_lanuch(const int argc, char *const *const argv) {
                                        &p.p, fps)) < 0)
                 {
                     if (frametimes) fclose(frametimes);
+                    input_close(in);
+                    txav1d_close(&c);
                     return EXIT_FAILURE;
                 }
             }
@@ -264,14 +337,16 @@ int txav1d_lanuch(const int argc, char *const *const argv) {
             break;
     } while (data.sz > 0 || !input_read(in, &data));
 
-    if (data.sz > 0) av1d_data_unref(&data);
+    if (data.sz > 0) txav1d_data_unref(&data);
 
     // flush
     if (res == 0) while (!cli_settings.limit || n_out < cli_settings.limit) {
-        if ((res = av1d_get_picture(c, &p)) < 0) {
-            if (res != AV1D_ERR(EAGAIN)) {
+        if ((res = signal_terminate)) break;
+        if ((res = txav1d_get_picture(c, &p)) < 0) {
+            if (res != TXAV1D_ERR(EAGAIN)) {
                 fprintf(stderr, "Error decoding frame: %s\n",
-                        strerror(AV1D_ERR(res)));
+                        strerror(TXAV1D_ERR(res)));
+                if (res != TXAV1D_ERR(EINVAL)) break;
             } else {
                 res = 0;
                 break;
@@ -283,6 +358,8 @@ int txav1d_lanuch(const int argc, char *const *const argv) {
                                        &p.p, fps)) < 0)
                 {
                     if (frametimes) fclose(frametimes);
+                    input_close(in);
+                    txav1d_close(&c);
                     return EXIT_FAILURE;
                 }
             }
@@ -312,8 +389,8 @@ int txav1d_lanuch(const int argc, char *const *const argv) {
         fprintf(stderr, "No data decoded\n");
         res = 1;
     }
-    av1d_close(&c);
+    txav1d_close(&c);
 
-//    return (res == 0) ? EXIT_SUCCESS : EXIT_FAILURE;
-    return totalFrames;
+    // App 侧需要的是输入流总帧数，而不是进程退出码
+    return total_frames;
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright © 2019, VideoLAN and dav1d authors
+ * Copyright © 2019, VideoLAN and txav1d authors
  * Copyright © 2019, Two Orioles, LLC
  * Copyright © 2019, James Almer <jamrial@gmail.com>
  * All rights reserved.
@@ -26,7 +26,7 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-//#include "config.h"
+#include "config.h"
 
 #include <stdio.h>
 #include <stdint.h>
@@ -34,7 +34,7 @@
 #include <string.h>
 #include <sys/types.h>
 
-#include "av1d/headers.h"
+#include "txav1d/headers.h"
 
 #include "demuxer.h"
 #include "parse.h"
@@ -46,10 +46,10 @@ static int section5_probe(const uint8_t *data) {
 
     // Check that the first OBU is a Temporal Delimiter.
     size_t obu_size;
-    enum Av1dObuType type;
+    enum Txav1dObuType type;
     ret = parse_obu_header(data + cnt, PROBE_SIZE - cnt,
                            &obu_size, &type, 0);
-    if (ret < 0 || type != AV1D_OBU_TD || obu_size > 0)
+    if (ret < 0 || type != TXAV1D_OBU_TD || obu_size > 0)
         return 0;
     cnt += ret;
 
@@ -63,14 +63,14 @@ static int section5_probe(const uint8_t *data) {
         cnt += ret;
 
         switch (type) {
-        case AV1D_OBU_SEQ_HDR:
+        case TXAV1D_OBU_SEQ_HDR:
             seq = 1;
             break;
-        case AV1D_OBU_FRAME:
-        case AV1D_OBU_FRAME_HDR:
+        case TXAV1D_OBU_FRAME:
+        case TXAV1D_OBU_FRAME_HDR:
             return seq;
-        case AV1D_OBU_TD:
-        case AV1D_OBU_TILE_GRP:
+        case TXAV1D_OBU_TD:
+        case TXAV1D_OBU_TILE_GRP:
             return 0;
         default:
             break;
@@ -103,8 +103,8 @@ static int section5_open(Section5InputContext *const c, const char *const file,
 
         if (fread(&byte[0], 1, 1, c->f) < 1)
             break;
-        const enum Av1dObuType obu_type = Av1dObuType((byte[0] >> 3) & 0xf);
-        if (obu_type == AV1D_OBU_TD)
+        const enum Txav1dObuType obu_type = (byte[0] >> 3) & 0xf;
+        if (obu_type == TXAV1D_OBU_TD)
             (*num_frames)++;
         const int has_length_field = byte[0] & 0x2;
         if (!has_length_field)
@@ -123,7 +123,7 @@ static int section5_open(Section5InputContext *const c, const char *const file,
     return 0;
 }
 
-static int section5_read(Section5InputContext *const c, Av1dData *const data) {
+static int section5_read(Section5InputContext *const c, Txav1dData *const data) {
     size_t total_bytes = 0;
 
     for (int first = 1;; first = 0) {
@@ -133,12 +133,12 @@ static int section5_read(Section5InputContext *const c, Av1dData *const data) {
             if (!first && feof(c->f)) break;
             return -1;
         }
-        const enum Av1dObuType obu_type = Av1dObuType((byte[0] >> 3) & 0xf);
+        const enum Txav1dObuType obu_type = (byte[0] >> 3) & 0xf;
         if (first) {
-            if (obu_type != AV1D_OBU_TD)
+            if (obu_type != TXAV1D_OBU_TD)
                 return -1;
         } else {
-            if (obu_type == AV1D_OBU_TD) {
+            if (obu_type == TXAV1D_OBU_TD) {
                 // include TD in next packet
                 fseeko(c->f, -1, SEEK_CUR);
                 break;
@@ -159,11 +159,11 @@ static int section5_read(Section5InputContext *const c, Av1dData *const data) {
     }
 
     fseeko(c->f, -(off_t)total_bytes, SEEK_CUR);
-    uint8_t *ptr = av1d_data_create(data, total_bytes);
+    uint8_t *ptr = txav1d_data_create(data, total_bytes);
     if (!ptr) return -1;
     if (fread(ptr, total_bytes, 1, c->f) != 1) {
         fprintf(stderr, "Failed to read frame data: %s\n", strerror(errno));
-        av1d_data_unref(data);
+        txav1d_data_unref(data);
         return -1;
     }
 
@@ -174,7 +174,7 @@ static void section5_close(Section5InputContext *const c) {
     fclose(c->f);
 }
 
-Demuxer section5_demuxer = {
+const Demuxer section5_demuxer = {
     .priv_data_size = sizeof(Section5InputContext),
     .name = "section5",
     .probe = section5_probe,

@@ -1,5 +1,5 @@
 /*
- * Copyright © 2018, VideoLAN and dav1d authors
+ * Copyright © 2018, VideoLAN and txav1d authors
  * Copyright © 2018, Two Orioles, LLC
  * All rights reserved.
  *
@@ -25,10 +25,10 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef AV1D_OUTPUT_MUXER_H
-#define AV1D_OUTPUT_MUXER_H
+#ifndef TXAV1D_OUTPUT_MUXER_H
+#define TXAV1D_OUTPUT_MUXER_H
 
-#include "av1d/picture.h"
+#include "txav1d/picture.h"
 
 typedef struct MuxerPriv MuxerPriv;
 typedef struct Muxer {
@@ -36,8 +36,8 @@ typedef struct Muxer {
     const char *name;
     const char *extension;
     int (*write_header)(MuxerPriv *ctx, const char *filename,
-                        const Av1dPictureParameters *p, const unsigned fps[2]);
-    int (*write_picture)(MuxerPriv *ctx, Av1dPicture *p);
+                        const Txav1dPictureParameters *p, const unsigned fps[2]);
+    int (*write_picture)(MuxerPriv *ctx, Txav1dPicture *p);
     void (*write_trailer)(MuxerPriv *ctx);
     /**
      * Verifies the muxed data (for example in the md5 muxer). Replaces write_trailer.
@@ -49,4 +49,4 @@ typedef struct Muxer {
     int (*verify)(MuxerPriv *ctx, const char *hash_string);
 } Muxer;
 
-#endif /* AV1D_OUTPUT_MUXER_H */
+#endif /* TXAV1D_OUTPUT_MUXER_H */

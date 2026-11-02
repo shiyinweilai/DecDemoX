@@ -1,5 +1,5 @@
 /*
- * Copyright © 2018, VideoLAN and dav1d authors
+ * Copyright © 2018, VideoLAN and txav1d authors
  * Copyright © 2018, Two Orioles, LLC
  * Copyright © 2019, James Almer <jamrial@gmail.com>
  * All rights reserved.
@@ -26,7 +26,7 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-//#include "config.h"
+#include "config.h"
 
 #include <stdio.h>
 #include <stdint.h>
@@ -35,7 +35,7 @@
 
 #include "common/intops.h"
 
-#include "av1d/headers.h"
+#include "txav1d/headers.h"
 
 #include "demuxer.h"
 #include "parse.h"
@@ -73,10 +73,10 @@ static int annexb_probe(const uint8_t *data) {
 
     // Check that the first OBU is a Temporal Delimiter.
     size_t obu_size;
-    enum Av1dObuType type;
+    enum Txav1dObuType type;
     ret = parse_obu_header(data + cnt, imin(PROBE_SIZE - cnt, (int) obu_unit_size),
                            &obu_size, &type, 1);
-    if (ret < 0 || type != AV1D_OBU_TD || obu_size > 0)
+    if (ret < 0 || type != TXAV1D_OBU_TD || obu_size > 0)
         return 0;
     cnt += (int)obu_unit_size;
 
@@ -97,14 +97,14 @@ static int annexb_probe(const uint8_t *data) {
         cnt += (int)obu_unit_size;
 
         switch (type) {
-        case AV1D_OBU_SEQ_HDR:
+        case TXAV1D_OBU_SEQ_HDR:
             seq = 1;
             break;
-        case AV1D_OBU_FRAME:
-        case AV1D_OBU_FRAME_HDR:
+        case TXAV1D_OBU_FRAME:
+        case TXAV1D_OBU_FRAME_HDR:
             return seq;
-        case AV1D_OBU_TD:
-        case AV1D_OBU_TILE_GRP:
+        case TXAV1D_OBU_TD:
+        case TXAV1D_OBU_TILE_GRP:
             return 0;
         default:
             break;
@@ -152,7 +152,7 @@ static int annexb_open(AnnexbInputContext *const c, const char *const file,
     return 0;
 }
 
-static int annexb_read(AnnexbInputContext *const c, Av1dData *const data) {
+static int annexb_read(AnnexbInputContext *const c, Txav1dData *const data) {
     size_t len;
     int res;
 
@@ -167,13 +167,13 @@ static int annexb_read(AnnexbInputContext *const c, Av1dData *const data) {
     }
     res = leb128(c->f, &len);
     if (res < 0 || (len + res) > c->frame_unit_size) return -1;
-    uint8_t *ptr = av1d_data_create(data, len);
+    uint8_t *ptr = txav1d_data_create(data, len);
     if (!ptr) return -1;
     c->temporal_unit_size -= len + res;
     c->frame_unit_size -= len + res;
     if (fread(ptr, len, 1, c->f) != 1) {
         fprintf(stderr, "Failed to read frame data: %s\n", strerror(errno));
-        av1d_data_unref(data);
+        txav1d_data_unref(data);
         return -1;
     }
 
@@ -184,7 +184,7 @@ static void annexb_close(AnnexbInputContext *const c) {
     fclose(c->f);
 }
 
-Demuxer annexb_demuxer = {
+const Demuxer annexb_demuxer = {
     .priv_data_size = sizeof(AnnexbInputContext),
     .name = "annexb",
     .probe = annexb_probe,

@@ -1,5 +1,5 @@
 /*
- * Copyright © 2018, VideoLAN and dav1d authors
+ * Copyright © 2018, VideoLAN and txav1d authors
  * Copyright © 2018, Two Orioles, LLC
  * All rights reserved.
  *
@@ -25,7 +25,7 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-//#include "config.h"
+#include "config.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -43,10 +43,10 @@ struct DemuxerContext {
     const Demuxer *impl;
 };
 
-extern Demuxer ivf_demuxer;
-extern Demuxer annexb_demuxer;
-extern Demuxer section5_demuxer;
-static const Demuxer * demuxers[] = {
+extern const Demuxer ivf_demuxer;
+extern const Demuxer annexb_demuxer;
+extern const Demuxer section5_demuxer;
+static const Demuxer *const demuxers[] = {
     &ivf_demuxer,
     &annexb_demuxer,
     &section5_demuxer,
@@ -70,28 +70,28 @@ int input_open(DemuxerContext **const c_out,
         }
         if (!demuxers[i]) {
             fprintf(stderr, "Failed to find demuxer named \"%s\"\n", name);
-            return AV1D_ERR(ENOPROTOOPT);
+            return TXAV1D_ERR(ENOPROTOOPT);
         }
     } else {
         int probe_sz = 0;
         for (i = 0; demuxers[i]; i++)
             probe_sz = imax(probe_sz, demuxers[i]->probe_sz);
-        uint8_t *const probe_data = (uint8_t *)malloc(probe_sz);
+        uint8_t *const probe_data = malloc(probe_sz);
         if (!probe_data) {
             fprintf(stderr, "Failed to allocate memory\n");
-            return AV1D_ERR(ENOMEM);
+            return TXAV1D_ERR(ENOMEM);
         }
         FILE *f = fopen(filename, "rb");
         if (!f) {
             fprintf(stderr, "Failed to open input file %s: %s\n", filename, strerror(errno));
-            return errno ? AV1D_ERR(errno) : AV1D_ERR(EIO);
+            return errno ? TXAV1D_ERR(errno) : TXAV1D_ERR(EIO);
         }
         res = !!fread(probe_data, 1, probe_sz, f);
         fclose(f);
         if (!res) {
             free(probe_data);
             fprintf(stderr, "Failed to read probe data\n");
-            return errno ? AV1D_ERR(errno) : AV1D_ERR(EIO);
+            return errno ? TXAV1D_ERR(errno) : TXAV1D_ERR(EIO);
         }
 
         for (i = 0; demuxers[i]; i++) {
@@ -105,13 +105,13 @@ int input_open(DemuxerContext **const c_out,
             fprintf(stderr,
                     "Failed to probe demuxer for file %s\n",
                     filename);
-            return AV1D_ERR(ENOPROTOOPT);
+            return TXAV1D_ERR(ENOPROTOOPT);
         }
     }
 
-    if (!(c = (DemuxerContext *)calloc(1, sizeof(DemuxerContext) + impl->priv_data_size))) {
+    if (!(c = calloc(1, sizeof(DemuxerContext) + impl->priv_data_size))) {
         fprintf(stderr, "Failed to allocate memory\n");
-        return AV1D_ERR(ENOMEM);
+        return TXAV1D_ERR(ENOMEM);
     }
     c->impl = impl;
     c->data = (DemuxerPriv *) &c[1];
@@ -124,7 +124,7 @@ int input_open(DemuxerContext **const c_out,
     return 0;
 }
 
-int input_read(DemuxerContext *const ctx, Av1dData *const data) {
+int input_read(DemuxerContext *const ctx, Txav1dData *const data) {
     return ctx->impl->read(ctx->data, data);
 }
 

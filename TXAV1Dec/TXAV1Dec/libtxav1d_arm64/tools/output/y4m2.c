@@ -1,5 +1,5 @@
 /*
- * Copyright © 2018, VideoLAN and dav1d authors
+ * Copyright © 2018, VideoLAN and txav1d authors
  * Copyright © 2018, Two Orioles, LLC
  * All rights reserved.
  *
@@ -25,7 +25,7 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-//#include "config.h"
+#include "config.h"
 
 #include <errno.h>
 #include <inttypes.h>
@@ -43,7 +43,7 @@ typedef struct MuxerPriv {
 } Y4m2OutputContext;
 
 static int y4m2_open(Y4m2OutputContext *const c, const char *const file,
-                     const Av1dPictureParameters *p, const unsigned fps[2])
+                     const Txav1dPictureParameters *p, const unsigned fps[2])
 {
     if (!strcmp(file, "-")) {
         c->f = stdout;
@@ -59,23 +59,23 @@ static int y4m2_open(Y4m2OutputContext *const c, const char *const file,
     return 0;
 }
 
-static int write_header(Y4m2OutputContext *const c, const Av1dPicture *const p) {
+static int write_header(Y4m2OutputContext *const c, const Txav1dPicture *const p) {
     static const char *const ss_names[][3] = {
-        [AV1D_PIXEL_LAYOUT_I400] = { "mono", "mono10", "mono12" },
-        [AV1D_PIXEL_LAYOUT_I420] = { NULL,   "420p10", "420p12" },
-        [AV1D_PIXEL_LAYOUT_I422] = { "422",  "422p10", "422p12" },
-        [AV1D_PIXEL_LAYOUT_I444] = { "444",  "444p10", "444p12" }
+        [TXAV1D_PIXEL_LAYOUT_I400] = { "mono", "mono10", "mono12" },
+        [TXAV1D_PIXEL_LAYOUT_I420] = { NULL,   "420p10", "420p12" },
+        [TXAV1D_PIXEL_LAYOUT_I422] = { "422",  "422p10", "422p12" },
+        [TXAV1D_PIXEL_LAYOUT_I444] = { "444",  "444p10", "444p12" }
     };
 
     static const char *const chr_names_8bpc_i420[] = {
-        [AV1D_CHR_UNKNOWN] = "420jpeg",
-        [AV1D_CHR_VERTICAL] = "420mpeg2",
-        [AV1D_CHR_COLOCATED] = "420"
+        [TXAV1D_CHR_UNKNOWN] = "420jpeg",
+        [TXAV1D_CHR_VERTICAL] = "420mpeg2",
+        [TXAV1D_CHR_COLOCATED] = "420"
     };
 
     const char *const ss_name =
-        p->p.layout == AV1D_PIXEL_LAYOUT_I420 && p->p.bpc == 8 ?
-        chr_names_8bpc_i420[p->seq_hdr->chr > 2 ? AV1D_CHR_UNKNOWN : p->seq_hdr->chr] :
+        p->p.layout == TXAV1D_PIXEL_LAYOUT_I420 && p->p.bpc == 8 ?
+        chr_names_8bpc_i420[p->seq_hdr->chr > 2 ? TXAV1D_CHR_UNKNOWN : p->seq_hdr->chr] :
         ss_names[p->p.layout][p->seq_hdr->hbd];
 
     const unsigned fw = p->p.w;
@@ -87,13 +87,13 @@ static int write_header(Y4m2OutputContext *const c, const Av1dPicture *const p) 
     aw /= gcd;
     ah /= gcd;
 
-    fprintf(c->f, "YUV4MPEG2 W%u H%u F%u:%u Ip A%" PRIu64":%" PRIu64" C%s\n",
+    fprintf(c->f, "YUV4MPEG2 W%u H%u F%u:%u Ip A%"PRIu64":%"PRIu64" C%s\n",
             fw, fh, c->fps[0], c->fps[1], aw, ah, ss_name);
 
     return 0;
 }
 
-static int y4m2_write(Y4m2OutputContext *const c, Av1dPicture *const p) {
+static int y4m2_write(Y4m2OutputContext *const c, Txav1dPicture *const p) {
     if (c->first) {
         c->first = 0;
         const int res = write_header(c, p);
@@ -104,21 +104,21 @@ static int y4m2_write(Y4m2OutputContext *const c, Av1dPicture *const p) {
     uint8_t *ptr;
     const int hbd = p->p.bpc > 8;
 
-    ptr = (uint8_t *)p->data[0];
+    ptr = p->data[0];
     for (int y = 0; y < p->p.h; y++) {
         if (fwrite(ptr, p->p.w << hbd, 1, c->f) != 1)
             goto error;
         ptr += p->stride[0];
     }
 
-    if (p->p.layout != AV1D_PIXEL_LAYOUT_I400) {
+    if (p->p.layout != TXAV1D_PIXEL_LAYOUT_I400) {
         // u/v
-        const int ss_ver = p->p.layout == AV1D_PIXEL_LAYOUT_I420;
-        const int ss_hor = p->p.layout != AV1D_PIXEL_LAYOUT_I444;
+        const int ss_ver = p->p.layout == TXAV1D_PIXEL_LAYOUT_I420;
+        const int ss_hor = p->p.layout != TXAV1D_PIXEL_LAYOUT_I444;
         const int cw = (p->p.w + ss_hor) >> ss_hor;
         const int ch = (p->p.h + ss_ver) >> ss_ver;
         for (int pl = 1; pl <= 2; pl++) {
-            ptr = (uint8_t *)p->data[pl];
+            ptr = p->data[pl];
             for (int y = 0; y < ch; y++) {
                 if (fwrite(ptr, cw << hbd, 1, c->f) != 1)
                     goto error;
@@ -127,11 +127,11 @@ static int y4m2_write(Y4m2OutputContext *const c, Av1dPicture *const p) {
         }
     }
 
-    av1d_picture_unref(p);
+    txav1d_picture_unref(p);
     return 0;
 
 error:
-    av1d_picture_unref(p);
+    txav1d_picture_unref(p);
     fprintf(stderr, "Failed to write frame data: %s\n", strerror(errno));
     return -1;
 }
@@ -141,7 +141,7 @@ static void y4m2_close(Y4m2OutputContext *const c) {
         fclose(c->f);
 }
 
-Muxer y4m2_muxer = {
+const Muxer y4m2_muxer = {
     .priv_data_size = sizeof(Y4m2OutputContext),
     .name = "yuv4mpeg2",
     .extension = "y4m",

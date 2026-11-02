@@ -1,5 +1,5 @@
 /*
- * Copyright © 2018, VideoLAN and dav1d authors
+ * Copyright © 2018, VideoLAN and txav1d authors
  * Copyright © 2018, Two Orioles, LLC
  * All rights reserved.
  *
@@ -25,42 +25,46 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef AV1D_COMMON_H
-#define AV1D_COMMON_H
+#ifndef TXAV1D_COMMON_H
+#define TXAV1D_COMMON_H
 
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
 
-#ifndef AV1D_API
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#ifndef TXAV1D_API
     #if defined _WIN32
-      #if defined AV1D_BUILDING_DLL
-        #define AV1D_API __declspec(dllexport)
+      #if defined TXAV1D_BUILDING_DLL
+        #define TXAV1D_API __declspec(dllexport)
       #else
-        #define AV1D_API
+        #define TXAV1D_API
       #endif
     #else
       #if __GNUC__ >= 4
-        #define AV1D_API __attribute__ ((visibility ("default")))
+        #define TXAV1D_API __attribute__ ((visibility ("default")))
       #else
-        #define AV1D_API
+        #define TXAV1D_API
       #endif
     #endif
 #endif
 
 #if EPERM > 0
-#define AV1D_ERR(e) (-(e)) ///< Negate POSIX error code.
+#define TXAV1D_ERR(e) (-(e)) ///< Negate POSIX error code.
 #else
-#define AV1D_ERR(e) (e)
+#define TXAV1D_ERR(e) (e)
 #endif
 
 /**
  * A reference-counted object wrapper for a user-configurable pointer.
  */
-typedef struct Av1dUserData {
+typedef struct Txav1dUserData {
     const uint8_t *data; ///< data pointer
-    struct Av1dRef *ref; ///< allocation origin
-} Av1dUserData;
+    struct Txav1dRef *ref; ///< allocation origin
+} Txav1dUserData;
 
 /**
  * Input packet metadata which are copied from the input data used to
@@ -70,12 +74,20 @@ typedef struct Av1dUserData {
  * still be passed from input data to output picture without being
  * used internally.
  */
-typedef struct Av1dDataProps {
+typedef struct Txav1dDataProps {
     int64_t timestamp; ///< container timestamp of input data, INT64_MIN if unknown (default)
     int64_t duration; ///< container duration of input data, 0 if unknown (default)
     int64_t offset; ///< stream offset of input data, -1 if unknown (default)
-    size_t size; ///< packet size, default Av1dData.sz
-    struct Av1dUserData user_data; ///< user-configurable data, default NULL members
-} Av1dDataProps;
+    size_t size; ///< packet size, default Txav1dData.sz
+    struct Txav1dUserData user_data; ///< user-configurable data, default NULL members
+} Txav1dDataProps;
 
-#endif /* AV1D_COMMON_H */
+/**
+ * Release reference to a Txav1dDataProps.
+ */
+TXAV1D_API void txav1d_data_props_unref(Txav1dDataProps *props);
+
+#ifdef __cplusplus
+} /* extern "C" */
+#endif
+#endif /* TXAV1D_COMMON_H */

@@ -1,5 +1,5 @@
 /*
- * Copyright © 2018, VideoLAN and dav1d authors
+ * Copyright © 2018, VideoLAN and txav1d authors
  * Copyright © 2018, Two Orioles, LLC
  * All rights reserved.
  *
@@ -25,7 +25,7 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-//#include "config.h"
+#include "config.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -40,7 +40,7 @@ typedef struct MuxerPriv {
 } YuvOutputContext;
 
 static int yuv_open(YuvOutputContext *const c, const char *const file,
-                    const Av1dPictureParameters *const p,
+                    const Txav1dPictureParameters *const p,
                     const unsigned fps[2])
 {
     if (!strcmp(file, "-")) {
@@ -53,25 +53,25 @@ static int yuv_open(YuvOutputContext *const c, const char *const file,
     return 0;
 }
 
-static int yuv_write(YuvOutputContext *const c, Av1dPicture *const p) {
+static int yuv_write(YuvOutputContext *const c, Txav1dPicture *const p) {
     uint8_t *ptr;
     const int hbd = p->p.bpc > 8;
 
-    ptr = (uint8_t *)p->data[0];
+    ptr = p->data[0];
     for (int y = 0; y < p->p.h; y++) {
         if (fwrite(ptr, p->p.w << hbd, 1, c->f) != 1)
             goto error;
         ptr += p->stride[0];
     }
 
-    if (p->p.layout != AV1D_PIXEL_LAYOUT_I400) {
+    if (p->p.layout != TXAV1D_PIXEL_LAYOUT_I400) {
         // u/v
-        const int ss_ver = p->p.layout == AV1D_PIXEL_LAYOUT_I420;
-        const int ss_hor = p->p.layout != AV1D_PIXEL_LAYOUT_I444;
+        const int ss_ver = p->p.layout == TXAV1D_PIXEL_LAYOUT_I420;
+        const int ss_hor = p->p.layout != TXAV1D_PIXEL_LAYOUT_I444;
         const int cw = (p->p.w + ss_hor) >> ss_hor;
         const int ch = (p->p.h + ss_ver) >> ss_ver;
         for (int pl = 1; pl <= 2; pl++) {
-            ptr = (uint8_t *)(p->data[pl]);
+            ptr = p->data[pl];
             for (int y = 0; y < ch; y++) {
                 if (fwrite(ptr, cw << hbd, 1, c->f) != 1)
                     goto error;
@@ -80,11 +80,11 @@ static int yuv_write(YuvOutputContext *const c, Av1dPicture *const p) {
         }
     }
 
-    av1d_picture_unref(p);
+    txav1d_picture_unref(p);
     return 0;
 
 error:
-    av1d_picture_unref(p);
+    txav1d_picture_unref(p);
     fprintf(stderr, "Failed to write frame data: %s\n", strerror(errno));
     return -1;
 }
@@ -94,7 +94,7 @@ static void yuv_close(YuvOutputContext *const c) {
         fclose(c->f);
 }
 
-Muxer yuv_muxer = {
+const Muxer yuv_muxer = {
     .priv_data_size = sizeof(YuvOutputContext),
     .name = "yuv",
     .extension = "yuv",

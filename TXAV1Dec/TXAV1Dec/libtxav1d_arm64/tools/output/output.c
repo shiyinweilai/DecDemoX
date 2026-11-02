@@ -1,5 +1,5 @@
 /*
- * Copyright © 2018, VideoLAN and dav1d authors
+ * Copyright © 2018, VideoLAN and txav1d authors
  * Copyright © 2018, Two Orioles, LLC
  * All rights reserved.
  *
@@ -25,8 +25,8 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-//#include "config.h"
-//#include "cli_config.h"
+#include "config.h"
+#include "cli_config.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -43,12 +43,12 @@ struct MuxerContext {
     const Muxer *impl;
 };
 
-extern Muxer null_muxer;
-extern Muxer md5_muxer;
-extern Muxer xxh3_muxer;
-extern Muxer yuv_muxer;
-extern Muxer y4m2_muxer;
-static Muxer *muxers[] = {
+extern const Muxer null_muxer;
+extern const Muxer md5_muxer;
+extern const Muxer xxh3_muxer;
+extern const Muxer yuv_muxer;
+extern const Muxer y4m2_muxer;
+static const Muxer *muxers[] = {
     &null_muxer,
     &md5_muxer,
 #if HAVE_XXHASH_H
@@ -78,7 +78,7 @@ static const char *find_extension(const char *const f) {
 
 int output_open(MuxerContext **const c_out,
                 const char *const name, const char *const filename,
-                const Av1dPictureParameters *const p, const unsigned fps[2])
+                const Txav1dPictureParameters *const p, const unsigned fps[2])
 {
     const Muxer *impl;
     MuxerContext *c;
@@ -94,7 +94,7 @@ int output_open(MuxerContext **const c_out,
         }
         if (!muxers[i]) {
             fprintf(stderr, "Failed to find muxer named \"%s\"\n", name);
-            return AV1D_ERR(ENOPROTOOPT);
+            return TXAV1D_ERR(ENOPROTOOPT);
         }
     } else if (!strcmp(filename, "/dev/null")) {
         impl = muxers[0];
@@ -112,13 +112,13 @@ int output_open(MuxerContext **const c_out,
         }
         if (!muxers[i]) {
             fprintf(stderr, "Failed to find muxer for extension \"%s\"\n", ext);
-            return AV1D_ERR(ENOPROTOOPT);
+            return TXAV1D_ERR(ENOPROTOOPT);
         }
     }
 
-    if (!(c = (MuxerContext *)malloc(sizeof(MuxerContext) + impl->priv_data_size))) {
+    if (!(c = malloc(sizeof(MuxerContext) + impl->priv_data_size))) {
         fprintf(stderr, "Failed to allocate memory\n");
-        return AV1D_ERR(ENOMEM);
+        return TXAV1D_ERR(ENOMEM);
     }
     c->impl = impl;
     c->data = (MuxerPriv *) &c[1];
@@ -131,7 +131,7 @@ int output_open(MuxerContext **const c_out,
     return 0;
 }
 
-int output_write(MuxerContext *const ctx, Av1dPicture *const p) {
+int output_write(MuxerContext *const ctx, Txav1dPicture *const p) {
     const int res = ctx->impl->write_picture(ctx->data, p);
     return res < 0 ? res : 0;
 }

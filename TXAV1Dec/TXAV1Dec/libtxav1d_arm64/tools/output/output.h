@@ -1,5 +1,5 @@
 /*
- * Copyright © 2018, VideoLAN and dav1d authors
+ * Copyright © 2018, VideoLAN and txav1d authors
  * Copyright © 2018, Two Orioles, LLC
  * All rights reserved.
  *
@@ -25,16 +25,16 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef AV1D_OUTPUT_OUTPUT_H
-#define AV1D_OUTPUT_OUTPUT_H
+#ifndef TXAV1D_OUTPUT_OUTPUT_H
+#define TXAV1D_OUTPUT_OUTPUT_H
 
-#include "av1d/picture.h"
+#include "txav1d/picture.h"
 
 typedef struct MuxerContext MuxerContext;
 
 int output_open(MuxerContext **c, const char *name, const char *filename,
-                const Av1dPictureParameters *p, const unsigned fps[2]);
-int output_write(MuxerContext *ctx, Av1dPicture *pic);
+                const Txav1dPictureParameters *p, const unsigned fps[2]);
+int output_write(MuxerContext *ctx, Txav1dPicture *pic);
 void output_close(MuxerContext *ctx);
 /**
  * Verifies the muxed data (for example in the md5 muxer). Replaces output_close.
@@ -45,4 +45,4 @@ void output_close(MuxerContext *ctx);
  */
 int output_verify(MuxerContext *ctx, const char *hash_string);
 
-#endif /* AV1D_OUTPUT_OUTPUT_H */
+#endif /* TXAV1D_OUTPUT_OUTPUT_H */

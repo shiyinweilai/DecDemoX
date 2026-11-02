@@ -1,5 +1,5 @@
 /*
- * Copyright © 2018, VideoLAN and dav1d authors
+ * Copyright © 2018, VideoLAN and txav1d authors
  * Copyright © 2018, Janne Grunau
  * All rights reserved.
  *
@@ -25,13 +25,17 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef AV1D_SRC_ARM_CPU_H
-#define AV1D_SRC_ARM_CPU_H
+#ifndef TXAV1D_SRC_ARM_CPU_H
+#define TXAV1D_SRC_ARM_CPU_H
 
 enum CpuFlags {
-    AV1D_ARM_CPU_FLAG_NEON = 1 << 0,
+    TXAV1D_ARM_CPU_FLAG_NEON = 1 << 0,
+    TXAV1D_ARM_CPU_FLAG_DOTPROD = 1 << 1,
+    TXAV1D_ARM_CPU_FLAG_I8MM = 1 << 2,
+    TXAV1D_ARM_CPU_FLAG_SVE = 1 << 3,
+    TXAV1D_ARM_CPU_FLAG_SVE2 = 1 << 4,
 };
 
-unsigned av1d_get_cpu_flags_arm(void);
+unsigned txav1d_get_cpu_flags_arm(void);
 
-#endif //AV1D_SRC_ARM_CPU_H
+#endif //TXAV1D_SRC_ARM_CPU_H

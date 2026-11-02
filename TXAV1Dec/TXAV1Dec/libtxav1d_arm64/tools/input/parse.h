@@ -1,5 +1,5 @@
 /*
- * Copyright © 2018, VideoLAN and dav1d authors
+ * Copyright © 2018, VideoLAN and txav1d authors
  * Copyright © 2018, Two Orioles, LLC
  * Copyright © 2019, James Almer <jamrial@gmail.com>
  * All rights reserved.
@@ -26,12 +26,12 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef AV1D_INPUT_PARSE_H
-#define AV1D_INPUT_PARSE_H
+#ifndef TXAV1D_INPUT_PARSE_H
+#define TXAV1D_INPUT_PARSE_H
 
 #include <limits.h>
 
-#include "av1d/headers.h"
+#include "txav1d/headers.h"
 
 static int leb128(FILE *const f, size_t *const len) {
     uint64_t val = 0;
@@ -71,7 +71,7 @@ static int leb(const uint8_t *ptr, int sz, size_t *const len) {
 
 static inline int parse_obu_header(const uint8_t *buf, int buf_size,
                                    size_t *const obu_size,
-                                   enum Av1dObuType *const type,
+                                   enum Txav1dObuType *const type,
                                    const int allow_implicit_size)
 {
     int ret, extension_flag, has_size_flag;
@@ -81,9 +81,7 @@ static inline int parse_obu_header(const uint8_t *buf, int buf_size,
     if (*buf & 0x80) // obu_forbidden_bit
         return -1;
 
-//    *type = (*buf & 0x78) >> 3;
-    *type = Av1dObuType((*buf & 0x78) >> 3);
-
+    *type = (*buf & 0x78) >> 3;
     extension_flag = (*buf & 0x4) >> 2;
     has_size_flag  = (*buf & 0x2) >> 1;
     // ignore obu_reserved_1bit
@@ -108,4 +106,4 @@ static inline int parse_obu_header(const uint8_t *buf, int buf_size,
     return buf_size + 1 + extension_flag;
 }
 
-#endif /* AV1D_INPUT_PARSE_H */
+#endif /* TXAV1D_INPUT_PARSE_H */

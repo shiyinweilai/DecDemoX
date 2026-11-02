@@ -1,5 +1,5 @@
 /*
- * Copyright © 2018, VideoLAN and dav1d authors
+ * Copyright © 2018, VideoLAN and txav1d authors
  * Copyright © 2018, Two Orioles, LLC
  * All rights reserved.
  *
@@ -25,14 +25,14 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-//#include "config.h"
+#include "config.h"
 
 #include "muxer.h"
 
 typedef struct MuxerPriv NullOutputContext;
 
-static int null_write(NullOutputContext *const c, Av1dPicture *const p) {
-    av1d_picture_unref(p);
+static int null_write(NullOutputContext *const c, Txav1dPicture *const p) {
+    txav1d_picture_unref(p);
     return 0;
 }
 
