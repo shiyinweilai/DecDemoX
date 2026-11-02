@@ -13,11 +13,20 @@ extern "C" {
 #endif
 
 /**
+ * txav1d_lanuch() 的失败返回码。
+ *
+ * 成功时返回输入流的总帧数（>= 0），失败时返回该负值。
+ * 使用负数而不是 EXIT_FAILURE(1)，是为了与“只有 1 帧的码流”区分开，
+ * 调用方用 `< 0` 判断失败即可。
+ */
+#define TXAV1D_LANUCH_ERROR (-1)
+
+/**
  * 启动一次 txav1d 解码，参数与 txav1d 命令行一致。
  *
  * @param argc 参数个数
  * @param argv 参数数组，与命令行语义相同
- * @return 输入流报告的帧总数；出错时返回 EXIT_FAILURE
+ * @return 输入流报告的帧总数；出错时返回 TXAV1D_LANUCH_ERROR
  */
 int txav1d_lanuch(const int argc, char *const *const argv);
 

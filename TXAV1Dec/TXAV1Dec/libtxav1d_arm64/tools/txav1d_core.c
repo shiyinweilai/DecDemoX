@@ -210,10 +210,11 @@ int txav1d_lanuch(const int argc, char *const *const argv) {
     if (strcmp(version, TXAV1D_VERSION)) {
         fprintf(stderr, "Version mismatch (library: %s, executable: %s)\n",
                 version, TXAV1D_VERSION);
-        return EXIT_FAILURE;
+        return TXAV1D_LANUCH_ERROR;
     }
 
-    parse(argc, argv, &cli_settings, &lib_settings);
+    if (parse(argc, argv, &cli_settings, &lib_settings) < 0)
+        return TXAV1D_LANUCH_ERROR;
     if (cli_settings.neg_stride) {
         lib_settings.allocator.alloc_picture_callback = picture_alloc;
         lib_settings.allocator.release_picture_callback = picture_release;
@@ -223,14 +224,14 @@ int txav1d_lanuch(const int argc, char *const *const argv) {
                           cli_settings.inputfile,
                           fps, &total, timebase)) < 0)
     {
-        return EXIT_FAILURE;
+        return TXAV1D_LANUCH_ERROR;
     }
     const int total_frames = (int)total;
 
     for (unsigned i = 0; i <= cli_settings.skip; i++) {
         if ((res = input_read(in, &data)) < 0) {
             input_close(in);
-            return EXIT_FAILURE;
+            return TXAV1D_LANUCH_ERROR;
         }
         if (i < cli_settings.skip) txav1d_data_unref(&data);
     }
@@ -245,7 +246,7 @@ int txav1d_lanuch(const int argc, char *const *const argv) {
         while (txav1d_parse_sequence_header(&seq, data.data, data.sz)) {
             if ((res = input_read(in, &data)) < 0) {
                 input_close(in);
-                return EXIT_FAILURE;
+                return TXAV1D_LANUCH_ERROR;
             }
             seq_skip++;
         }
@@ -259,7 +260,7 @@ int txav1d_lanuch(const int argc, char *const *const argv) {
         total = cli_settings.limit;
 
     if ((res = txav1d_open(&c, &lib_settings)))
-        return EXIT_FAILURE;
+        return TXAV1D_LANUCH_ERROR;
 
     if (cli_settings.frametimes)
         frametimes = fopen(cli_settings.frametimes, "w");
@@ -319,7 +320,7 @@ int txav1d_lanuch(const int argc, char *const *const argv) {
                     if (frametimes) fclose(frametimes);
                     input_close(in);
                     txav1d_close(&c);
-                    return EXIT_FAILURE;
+                    return TXAV1D_LANUCH_ERROR;
                 }
             }
             if ((res = output_write(out, &p)) < 0)
@@ -360,7 +361,7 @@ int txav1d_lanuch(const int argc, char *const *const argv) {
                     if (frametimes) fclose(frametimes);
                     input_close(in);
                     txav1d_close(&c);
-                    return EXIT_FAILURE;
+                    return TXAV1D_LANUCH_ERROR;
                 }
             }
             if ((res = output_write(out, &p)) < 0)

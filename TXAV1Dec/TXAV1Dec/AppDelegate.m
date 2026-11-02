@@ -17,7 +17,10 @@
 
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
-    // Override point for customization after application launch.
+    // 注意：不要在这里捕获内存基线。此时进程 footprint 只有几 MB，
+    // 界面、字体、UIKit 都还没加载，之后它们会长到几十 MB，
+    // 那样算出的「净内存」会把界面开销全算成解码器成本。
+    // 基线在界面加载完成后、首次解码之前捕获，见 ViewController。
     return YES;
 }
 

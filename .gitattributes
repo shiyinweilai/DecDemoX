@@ -4,6 +4,11 @@
 *.a         filter=lfs diff=lfs merge=binary -text
 *.pbxproj   filter=lfs diff=lfs merge=binary -text
 
+# 测试码流体积大且不可压缩，走 LFS 避免仓库膨胀
+*.stream filter=lfs diff=lfs merge=binary -text
+*.ivf    filter=lfs diff=lfs merge=binary -text
+*.obu    filter=lfs diff=lfs merge=binary -text
+
 # ============================================
 # 其他二进制文件
 # ============================================

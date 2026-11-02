@@ -49,7 +49,13 @@ typedef struct {
     int neg_stride;
 } CLISettings;
 
-void parse(const int argc, char *const *const argv,
-           CLISettings *const cli_settings, Txav1dSettings *const lib_settings);
+/**
+ * 解析命令行参数。
+ *
+ * @return 0 表示解析成功；-1 表示参数有误（错误信息已打印）。
+ *         注意：本函数不会调用 exit()，可安全地在 App 内重复调用。
+ */
+int parse(const int argc, char *const *const argv,
+          CLISettings *const cli_settings, Txav1dSettings *const lib_settings);
 
 #endif /* TXAV1D_CLI_PARSE_H */

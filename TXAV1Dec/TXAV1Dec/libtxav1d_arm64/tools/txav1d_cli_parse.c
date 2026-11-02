@@ -116,7 +116,13 @@ static const struct option long_opts[] = {
 #define ALLOWED_CPU_MASKS "not yet implemented for this architecture"
 #endif
 
+/* 命令行工具进程只解析一次参数，出错后直接 exit() 是合理的；但 App 每次点击
+ * 按钮都会调用一次 parse()，exit() 会把宿主进程杀掉，表现为“点一下就崩”。
+ * 因此这里只记录错误标志，由 parse() 返回失败码给调用方。 */
+static int cli_parse_errored;
+
 static void usage(const char *const app, const char *const reason, ...) {
+    cli_parse_errored = 1;
     if (reason) {
         va_list args;
 
@@ -156,7 +162,7 @@ static void usage(const char *const app, const char *const reason, ...) {
             " --inloopfilters $str: which in-loop filters to enable (none, (no)deblock, (no)cdef, (no)restoration or all; default: all)\n"
             " --decodeframetype $str: which frame types to decode (reference, intra, key or all; default: all)\n"
             );
-    exit(1);
+    /* 不在此处 exit：App 场景下参数错误只应表现为本次解码失败 */
 }
 
 static void error(const char *const app, const char *const optarg,
@@ -316,10 +322,20 @@ static unsigned parse_enum(char *optarg, const EnumParseTable *const tbl,
     return res;
 }
 
-void parse(const int argc, char *const *const argv,
-           CLISettings *const cli_settings, Txav1dSettings *const lib_settings)
+int parse(const int argc, char *const *const argv,
+         CLISettings *const cli_settings, Txav1dSettings *const lib_settings)
 {
     int o;
+
+    /* optind 是 libc 的进程级全局变量，App 内多次点击按钮会重复进入本函数。
+     * 不重置的话，第二次调用时 optind 仍等于上一次的 argc，while 循环一次
+     * 都不执行，inputfile 保持为 NULL，最终误报“缺少输入文件”。 */
+    optind = 1;
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
+    defined(__NetBSD__)
+    optreset = 1;
+#endif
+    cli_parse_errored = 0;
 
     memset(cli_settings, 0, sizeof(*cli_settings));
     txav1d_default_settings(lib_settings);
@@ -412,7 +428,8 @@ void parse(const int argc, char *const *const argv,
             break;
         case 'v':
             fprintf(stderr, "%s\n", txav1d_version());
-            exit(0);
+            /* 同上：不使用 exit(0)，直接视为解析结束 */
+            return 0;
         case ARG_CPU_MASK:
             txav1d_set_cpu_flags_mask(parse_enum(optarg, cpu_mask_tbl, ARRAY_SIZE(cpu_mask_tbl),
                                                  ARG_CPU_MASK, argv[0]));
@@ -470,4 +487,7 @@ void parse(const int argc, char *const *const argv,
     {
         usage(argv[0], "Output file (-o/--output) is required");
     }
+
+    /* usage() 已不再 exit，这里把失败状态一并返回给调用方 */
+    return cli_parse_errored ? -1 : 0;
 }
