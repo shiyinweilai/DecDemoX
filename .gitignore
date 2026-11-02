@@ -1,0 +1,111 @@
+# ============================================
+# macOS
+# ============================================
+.DS_Store
+.AppleDouble
+.LSOverride
+.Icon?
+._*
+.Spotlight-V100
+.Trashes
+
+# ============================================
+# Xcode — 用户级状态（不入库，每人各不相同）
+# ============================================
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad/
+*.xcscmblueprint
+*.xccheckout
+*.moved-aside
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+*.hmap
+*.ipa
+*.dSYM
+*.dSYM.zip
+
+# ============================================
+# Xcode — 构建产物
+# ============================================
+build/
+DerivedData/
+.build/
+*.xcresult
+timeline.xctimeline
+playground.xcworkspace
+*.xcbuilddata/
+xcbuilddata/
+Intermediates.noindex/
+
+# ============================================
+# C / C++ / 编译中间文件
+# ============================================
+*.o
+*.lo
+*.lo.o
+*.i
+*.ii
+*.s
+*.d
+*.dia
+*.gcno
+*.gcda
+*.gcov
+*.gch
+*.pch
+*.hmap
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+!*/CMakeLists.txt
+
+# 注意：不要忽略 *.a —— 本工程的 av1d 静态库需要入库
+
+# ============================================
+# 依赖管理
+# ============================================
+Pods/
+Podfile.lock
+.swiftpm/
+Package.resolved
+Carthage/Build/
+vendor/bundle/
+
+# ============================================
+# 编辑器 / IDE
+# ============================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.tags
+cscope.*
+compile_commands.json
+
+# ============================================
+# 日志与临时文件
+# ============================================
+*.log
+core
+core.*
+*.tmp
+*.bak
+*.orig
+*.rej
+
+# ============================================
+# 测试与性能数据（如使用）
+# ============================================
+*.trace
+*.instruments
+profiling/
+coverage/
