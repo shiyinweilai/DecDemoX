@@ -644,8 +644,10 @@
         [self.selectedDecoders addObject:decoder];
         // 保持与版本库一致的降序，避免用户按点击顺序得到 1.4.2、1.4.3 交替的
         // 结果列表，那种顺序会让对比表列序随点击顺序漂移。
+        // 复用版本库的比较器而不是本地写一份：两处各写一份时，
+        // 排序基准一旦分叉，勾选顺序与列表顺序就会不一致。
         [self.selectedDecoders sortUsingComparator:^NSComparisonResult(BenchDecoder *a, BenchDecoder *b) {
-            return [a.version compare:b.version options:NSNumericSearch];
+            return [BenchDecoderLibrary compareVersion:a.version with:b.version];
         }];
     }
     [self refreshDecoderPickerDisplay];

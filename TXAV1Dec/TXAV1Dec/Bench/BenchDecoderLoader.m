@@ -40,15 +40,29 @@ typedef const char *(*VersionFn)(void);
     }
 }
 
+/// 去掉点号后的版本形式，用于跨命名风格比较。
+/// 目录名 txav1d143 对应头文件 "1.4.3"，压缩后都是 143，视为一致。
++ (NSString *)compactVersion:(NSString *)version {
+    return [version stringByReplacingOccurrencesOfString:@"." withString:@""];
+}
+
 - (NSString *)displayName {
-    // 库自报版本与目录名不一致时，两个都显示出来。
-    // 这种错配是换库漏改目录名造成的，从数据上完全看不出来，必须让它可见。
+    // 目录名本身就是版本标识（txav1d142 / dav1d151），直接用它。
+    // 早先这里拼成 "txav1d 1.4.3"，改成目录名之后会变成
+    // "txav1d txav1d143" 这种重复，所以必须换掉前缀拼接。
+    NSString *name = self.version;
+
+    // 库自报版本与目录名不一致时才追加提示。比较用压缩形式，
+    // 因为目录名是 txav1d143、库自报是 1.4.3，写法不同但指向同一版本；
+    // 只有压缩后仍不相等才是真正的错配（换了库漏改目录名），
+    // 这种错配从数据上完全看不出来，必须让它可见。
     if (self.libraryReportedVersion.length > 0 &&
-        ![self.libraryReportedVersion isEqualToString:self.version]) {
-        return [NSString stringWithFormat:@"txav1d %@（目录 %@）",
-                self.libraryReportedVersion, self.version];
+        ![[BenchDecoder compactVersion:self.libraryReportedVersion]
+          isEqualToString:[BenchDecoder compactVersion:self.version]]) {
+        return [NSString stringWithFormat:@"%@（库自报 %@）",
+                name, self.libraryReportedVersion];
     }
-    return [NSString stringWithFormat:@"txav1d %@", self.version];
+    return name;
 }
 
 - (BOOL)isUsable {
@@ -147,18 +161,39 @@ typedef const char *(*VersionFn)(void);
     return [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"Frameworks"];
 }
 
-/// 按版本号降序比较，使「最新版本排在最前」，符合默认关注点。
+/// 按版本从新到旧比较。
+///
+/// 目录名有两种风格：旧的三点式（1.4.3）和新命名的压缩式（txav1d143、
+/// dav1d151）。原来按 "." 切分再比数字，遇到 txav1d143 这种没有点号的
+/// 名字会全部落到同一段，排序退化成不稳定、结果不可预期。
+/// 这里改为：先按名字里的数字序列比较（把 txav1d143 抽出 143），
+/// 数字相同再按字面比较，保证排序稳定。
 + (NSComparisonResult)compareVersion:(NSString *)a with:(NSString *)b {
-    NSArray<NSString *> *pa = [a componentsSeparatedByString:@"."];
-    NSArray<NSString *> *pb = [b componentsSeparatedByString:@"."];
-    const NSUInteger n = MAX(pa.count, pb.count);
-    for (NSUInteger i = 0; i < n; i++) {
-        const NSInteger va = i < pa.count ? pa[i].integerValue : 0;
-        const NSInteger vb = i < pb.count ? pb[i].integerValue : 0;
-        if (va != vb) return va > vb ? NSOrderedAscending : NSOrderedDescending;
+    NSString *da = [self digitsOf:a];
+    NSString *db = [self digitsOf:b];
+    if (da.length > 0 && db.length > 0 && ![da isEqualToString:db]) {
+        // 位数不同时先比位数：1.5.1→151 与 1.4.3→143 都是三位可直接比，
+        // 但 2.0.0→200 与 1.10.0→1100 位数不同，必须按数值而非字面比。
+        if (da.length != db.length) {
+            return da.length > db.length ? NSOrderedAscending : NSOrderedDescending;
+        }
+        const NSComparisonResult r = [da compare:db];
+        return r == NSOrderedSame ? NSOrderedSame
+                                  : (r == NSOrderedDescending ? NSOrderedAscending
+                                                              : NSOrderedDescending);
     }
-    // 数值完全相等时按字面比较，保证排序稳定（如 1.4.2 与 1.4.02）
-    return [a compare:b];
+    // 数字相同（或都抽不出数字）时按字面倒序，让结果稳定可预期
+    return [b compare:a];
+}
+
+/// 抽出字符串里的全部数字，用于跨命名风格比较版本高低。
++ (NSString *)digitsOf:(NSString *)text {
+    NSMutableString *out = [NSMutableString string];
+    for (NSUInteger i = 0; i < text.length; i++) {
+        const unichar c = [text characterAtIndex:i];
+        if (c >= '0' && c <= '9') [out appendFormat:@"%C", c];
+    }
+    return out;
 }
 
 + (NSArray<BenchDecoder *> *)availableDecoders {

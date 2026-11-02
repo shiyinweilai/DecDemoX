@@ -35,7 +35,7 @@ NS_ASSUME_NONNULL_BEGIN
  */
 @interface BenchDecoder : NSObject
 
-/** 版本标识，取自 DecoderSDK 下的目录名，例如 "1.4.3" */
+/** 版本标识，取自 DecoderSDK 下的目录名，例如 "txav1d143" / "dav1d151" */
 @property (nonatomic, copy, readonly) NSString *version;
 
 /** dylib 的绝对路径 */
@@ -47,7 +47,7 @@ NS_ASSUME_NONNULL_BEGIN
 /** 该版本的构建时间，取自 dylib 文件修改时间，用于区分同名重编 */
 @property (nonatomic, copy, readonly) NSString *buildStamp;
 
-/** 用于界面与报告展示的名称，例如 "txav1d 1.4.3" */
+/** 用于界面与报告展示的名称，例如 "txav1d143" / "dav1d151" */
 @property (nonatomic, copy, readonly) NSString *displayName;
 
 /** 加载失败的原因，成功时为 nil */
@@ -91,6 +91,14 @@ NS_ASSUME_NONNULL_BEGIN
 
 /** 兜底版本：列表为空时返回 nil，界面据此提示用户去检查构建 */
 + (nullable BenchDecoder *)preferredDecoder;
+
+/**
+ * 版本比较器，供界面与版本库共用同一套排序规则。
+ *
+ * 单独公开是因为界面按点击顺序维护选中列表，也要排序；
+ * 如果两处各写一份，排序基准一旦分叉，勾选顺序与列表顺序就会不一致。
+ */
++ (NSComparisonResult)compareVersion:(NSString *)a with:(NSString *)b;
 
 @end
 

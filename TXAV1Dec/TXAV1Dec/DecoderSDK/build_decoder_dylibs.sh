@@ -76,39 +76,80 @@ for version_dir in "${SDK_DIR}"/*/; do
     .*|include|lib|tools|config|src) continue ;;
   esac
 
-  lib="${version_dir}lib/libtxav1d.a"
   inc="${version_dir}include"
-  vcs="${inc}/txav1d/vcs_version.h"
 
-  # 还没放库的目录直接跳过，不算错误，方便先建目录后补文件
-  if [ ! -f "${lib}" ]; then
-    echo "warning: 跳过 ${version}（缺少 lib/libtxav1d.a）"
+  # 库文件名有两种：txav1d 系是 libtxav1d.a，上游 dav1d 是 libdav1d.a。
+  # 按存在性选择，而不是按目录名猜 —— 目录名由人起，随时可能改成别的，
+  # 文件名则是构建产物的固定约定。dav1d 目录里还带一层 txav1d/ 兼容头，
+  # 那层负责把共用源码里的 txav1d_* 名字映射到 dav1d_*。
+  if [ -f "${version_dir}lib/libtxav1d.a" ]; then
+    lib="${version_dir}lib/libtxav1d.a"
+  elif [ -f "${version_dir}lib/libdav1d.a" ]; then
+    lib="${version_dir}lib/libdav1d.a"
+  else
+    # 还没放库的目录直接跳过，不算错误，方便先建目录后补文件
+    echo "warning: 跳过 ${version}（缺少 lib/libtxav1d.a 或 lib/libdav1d.a）"
     continue
   fi
+
+  vcs="${inc}/txav1d/vcs_version.h"
   if [ ! -f "${vcs}" ]; then
     echo "error: ${version} 缺少 include/txav1d/vcs_version.h，无法确定版本"
     FAILED=1
     continue
   fi
 
-  header_ver="$(sed -n 's/.*TXAV1D_VERSION[[:space:]]*"\([^"]*\)".*/\1/p' "${vcs}" | head -1)"
-  if [ "${header_ver}" != "${version}" ]; then
-    echo "error: 版本不一致 —— 目录为 ${version}，但头文件声明 ${header_ver}"
+  # 目录名不再要求等于三点式版本号：dav1d 的目录叫 dav1d151，而版本串是 1.5.1。
+  # 但仍然要求头文件里存在版本宏，且宏值必须能以压缩形式对上目录名里的数字，
+  # 例如 dav1d151 ↔ "1.5.1"、txav1d143 ↔ "1.4.3"。
+  # 这样换库漏改目录名时依然会中止构建，而不是安静地跑错版本。
+  #
+  # 注意这里不能用 sed 的 \(A\|B\) 交替：BSD sed（macOS 自带）不认这个语法，
+  # 会静默匹配不到任何内容，表现成「头文件里没有版本宏」这种误导性报错。
+  header_ver=""
+  for macro in TXAV1D_VERSION DAV1D_VERSION; do
+    v="$(sed -n "s/.*${macro}[[:space:]]*\"\([^\"]*\)\".*/\1/p" "${vcs}" | head -1)"
+    if [ -n "${v}" ]; then
+      header_ver="${v}"
+      break
+    fi
+  done
+  if [ -z "${header_ver}" ]; then
+    echo "error: ${version} 的 vcs_version.h 里没有版本宏"
     FAILED=1
     continue
   fi
 
-  # 静态库里内嵌的版本串就是 txav1d_version() 的返回值，
+  compact_header="$(printf '%s' "${header_ver}" | tr -d '.')"
+  case "${version}" in
+    *"${compact_header}") ;;
+    *)
+      echo "error: 版本不一致 —— 目录为 ${version}，但头文件声明 ${header_ver}"
+      FAILED=1
+      continue
+      ;;
+  esac
+
+  # 静态库里内嵌的版本串就是 version() 的返回值，
   # 用它确认 .a 与头文件确实同源，而不是混了两个不同批次的产物。
   lib_ver="$(strings "${lib}" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -u | head -1)"
-  if [ -n "${lib_ver}" ] && [ "${lib_ver}" != "${version}" ]; then
-    echo "error: 版本不一致 —— 目录为 ${version}，但静态库实际是 ${lib_ver}"
+  if [ -n "${lib_ver}" ] && [ "${lib_ver}" != "${header_ver}" ]; then
+    echo "error: 版本不一致 —— 头文件声明 ${header_ver}，但静态库实际是 ${lib_ver}"
     FAILED=1
     continue
+  fi
+
+  # 版本目录下若有 src/*.c，说明这是需要额外适配源码的库（dav1d 的兼容层）。
+  # 没有就为空，不影响 txav1d 那几个纯静态库版本。
+  shim_sources=""
+  if [ -d "${version_dir}src" ]; then
+    for f in "${version_dir}"src/*.c; do
+      [ -f "$f" ] && shim_sources="${shim_sources} $f"
+    done
   fi
 
   out="${OUT_DIR}/libtxav1d_${version}.dylib"
-  echo "note: 构建解码器动态库 ${version}"
+  echo "note: 构建解码器动态库 ${version}（${lib##*/}${shim_sources:+ + shim}）"
 
   # shellcheck disable=SC2086
   "${CLANG}" -dynamiclib -arch arm64 \
@@ -116,11 +157,11 @@ for version_dir in "${SDK_DIR}"/*/; do
     -isysroot "${SYSROOT}" \
     -install_name "@rpath/libtxav1d_${version}.dylib" \
     -O2 -fPIC \
-    -I"${inc}" -I"${inc}/txav1d" \
+    -I"${inc}" -I"${inc}/txav1d" -I"${inc}/.." \
     -I"${TOOLS_DIR}" -I"${TOOLS_DIR}/tools" \
     -I"${TOOLS_DIR}/src" -I"${TOOLS_DIR}/config/ios" \
     -o "${out}" \
-    ${SOURCES} \
+    ${SOURCES} ${shim_sources} \
     "${lib}"
 
   # 必须在这里单独签名：Frameworks 里由脚本产出的 dylib 不在 Xcode

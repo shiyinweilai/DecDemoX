@@ -26,15 +26,20 @@ DecDemoX/
         ├── streams/                   # 码流目录（构建时自动打包进 App）
         │   └── test3.stream
         ├── BuiltinStreams / Assets.xcassets / Base.lproj / Info.plist / TXAV1Dec.entitlements
-        ├── DecoderSDK/                # 解码器版本快照，按版本号分目录
-        │   ├── Version.xcconfig       # 当前测试哪个版本（只改这一行）
-        │   ├── verify_decoder_sdk.sh  # 构建期校验版本一致性
-        │   ├── 1.4.2/
+        ├── DecoderSDK/                # 解码器版本快照，按目录名分版本
+        │   ├── Version.xcconfig       # 头文件路径派生（不再选择版本）
+        │   ├── build_decoder_dylibs.sh # 构建期把每个版本编成独立动态库
+        │   ├── txav1d142/
         │   │   ├── include/           # 公共头文件（txav1d.h / picture.h / vcs_version.h 等）
         │   │   └── lib/libtxav1d.a    # 该版本的静态库（arm64, iphoneos）
-        │   └── 1.4.3/
-        │       ├── include/
-        │       └── lib/libtxav1d.a
+        │   ├── txav1d143/
+        │   │   ├── include/
+        │   │   └── lib/libtxav1d.a
+        │   └── dav1d151/              # 上游 dav1d，与 txav1d 不是同一套 API
+        │       ├── include/dav1d/     # 上游公共头
+        │       ├── include/txav1d/    # 兼容层：把 txav1d_* 映射到 dav1d_*
+        │       ├── src/txav1d_shim.c  # 兼容层里需要真实包装的两个函数
+        │       └── lib/libdav1d.a
         └── DecoderTools/              # 各版本共用的测试代码（不随版本变化）
             ├── src/                   # cpu.h、arm/cpu.h（CPU 特性检测声明）
             ├── config/ios/            # config.h、cli_config.h（等价 Meson 生成物）
@@ -159,7 +164,7 @@ xcodebuild -project TXAV1Dec.xcodeproj -scheme TXAV1Dec \
 
 - iOS 16.0+
 - 仅支持真机 arm64（静态库不含模拟器切片，模拟器构建会失败）
-- 解码库与头文件版本必须一致（当前 1.4.2），版本不匹配时解码入口会直接返回失败
+- 解码库与头文件版本必须一致，版本不匹配时解码入口会直接返回失败。构建期会做这项校验，目录名、头文件宏、库内嵌版本串三者必须指向同一版本
 
 ## 验证
 
@@ -182,12 +187,39 @@ xcodebuild -project TXAV1Dec.xcodeproj -scheme TXAV1Dec \
 
 界面上的「解码器版本（可多选）」与码流选择是同一套交互：点开弹出列表，勾选一个或多个版本。**版本列表直接来自 `DecoderSDK` 下的子目录名**，新增版本只需放一个目录并重新编译，界面自动多出一项，不需要改任何代码。
 
+目录名就是界面上显示的版本标识，目前有三项：
+
 ```
 TXAV1Dec/TXAV1Dec/DecoderSDK/
-├── 1.4.2/{include, lib/libtxav1d.a}
-├── 1.4.3/{include, lib/libtxav1d.a}
+├── txav1d142/{include, lib/libtxav1d.a}
+├── txav1d143/{include, lib/libtxav1d.a}
+├── dav1d151/{include, src, lib/libdav1d.a}
 ├── Version.xcconfig            # 头文件与路径派生
 └── build_decoder_dylibs.sh     # 构建期把每个版本编成独立动态库
+```
+
+目录名不必是三点式版本号。构建脚本会从头文件的 `TXAV1D_VERSION` / `DAV1D_VERSION` 宏取出真实版本串，再与目录名里的数字做压缩比对：`dav1d151` ↔ `"1.5.1"`、`txav1d143` ↔ `"1.4.3"` 都算一致。这样换库漏改目录名时仍会中止构建，而不会安静地跑错版本。
+
+### 接入上游 dav1d
+
+`dav1d151` 来自 `/Users/rbyang/Documents/UGit/codec/dav1d`（上游 VideoLAN dav1d 1.5.1），它与 txav1d 有两个实质差异：
+
+- **API 前缀不同**：上游是 `dav1d_` / `Dav1d`，txav1d 是 `txav1d_` / `Txav1d`。
+- **`Dav1dSettings` 没有 `use_wpp`**：那是 txav1d 的私有扩展，上游没有对应开关。
+
+工程没有为此复制一份 tools 源码，而是在 `dav1d151/include/txav1d/` 下放了一层名字映射头：共用源码原样编译，`txav1d_open`、`Txav1dPicture` 等由宏解析到 `dav1d_*` / `Dav1d*`。真正需要包装的只有 `txav1d_default_settings` 与 `txav1d_open` 两个（因为设置结构体多了 `use_wpp`，必须逐字段搬运），实现放在 `dav1d151/src/txav1d_shim.c`。
+
+这样共用代码路径始终只有一份。若复制源码改名，将来每加一个解码器族都要再复制一次，迟早出现「改了一份漏了另一份」的静默错配。
+
+`use_wpp` 在 dav1d 侧固定填 -1 并忽略任何非 -1 值，因为上游始终启用 WPP。若填 0，共用源码会以为「已关闭」，报告里就会写下与实际不符的配置。
+
+上游库的版本串由 `git describe` 生成，直接构建会得到 commit hash 而不是 `1.5.1`。做法是拷贝源码到无 `.git` 的目录再构建，`vcs_tag` 便回退到 `project()` 里声明的版本号：
+
+```bash
+meson setup <build> --cross-file package/crossfiles/arm64-iPhoneOS.meson \
+  --default-library=static -Denable_tools=false -Denable_tests=false \
+  -Denable_examples=false -Denable_asm=true -Dbitdepths=8,16 --buildtype=release
+ninja -C <build>
 ```
 
 ### 为什么必须编成动态库
@@ -214,10 +246,13 @@ TXAV1Dec/TXAV1Dec/DecoderSDK/
 
 ### 新增一个版本
 
-1. 新建 `DecoderSDK/<新版本>/`，放入 `include/`（整套头文件）和 `lib/libtxav1d.a`
-2. 直接编译
+1. 新建 `DecoderSDK/<名字>/`，放入 `include/`（整套头文件）和 `lib/`
+2. 库文件名按来源取：txav1d 系用 `libtxav1d.a`，上游 dav1d 用 `libdav1d.a`，脚本按存在性自动识别
+3. 直接编译
 
-构建脚本会校验三处一致：目录名、`vcs_version.h` 的 `TXAV1D_VERSION` 宏、静态库内嵌的版本字符串。任一处不符即中止构建。版本号同时存在于目录名和头文件两处，换库时漏改会造成「目录写 A、实际跑 B」的静默错配，而这种错配从数据上完全看不出来。
+构建脚本会校验三处一致：目录名里的数字、`vcs_version.h` 的版本宏、静态库内嵌的版本串。任一处不符即中止构建。版本号同时存在于目录名和头文件两处，换库时漏改会造成「目录写 A、实际跑 B」的静默错配，而这种错配从数据上完全看不出来。
+
+若新版本来自与 txav1d API 不同的分支（如上游 dav1d），需要在该版本目录的 `include/txav1d/` 下放一层名字映射头，并把无法用宏表达的适配实现在 `src/` 里，脚本会自动把它一起编进 dylib。
 
 单个版本加载失败不会影响其他版本，界面会把它标为不可用并显示原因。
 
@@ -227,11 +262,11 @@ TXAV1Dec/TXAV1Dec/DecoderSDK/
 
 | 版本 | 码流 | fps | ms/f | CPU% | P95 ms | 净内存 |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1.4.3 | test3 | 363.54 | 2.751 | 16.73% | 16.74 | 30.9 MB |
-| 1.4.3 | test3_copy | 352.06 | 2.840 | 16.69% | 16.97 | 30.2 MB |
-| 1.4.2 | test3 | 345.81 | 2.892 | 16.52% | 17.71 | 30.6 MB |
-| 1.4.2 | test3_copy | 342.42 | 2.920 | 16.73% | 17.88 | 30.1 MB |
+| txav1d143 | test3 | 363.54 | 2.751 | 16.73% | 16.74 | 30.9 MB |
+| txav1d143 | test3_copy | 352.06 | 2.840 | 16.69% | 16.97 | 30.2 MB |
+| txav1d142 | test3 | 345.81 | 2.892 | 16.52% | 17.71 | 30.6 MB |
+| txav1d142 | test3_copy | 342.42 | 2.920 | 16.73% | 17.88 | 30.1 MB |
 
-跨版本：1.4.3 相对 1.4.2 在 test3 上 +5.1% fps、在 test3_copy 上 +2.8% fps，CPU 基本持平。
+跨版本：txav1d143 相对 txav1d142 在 test3 上 +5.1% fps、在 test3_copy 上 +2.8% fps，CPU 基本持平。
 
-注意这个差值不宜直接当成版本改进量：1.4.3 总是先跑，设备温度与频率状态更有利。要排除顺序效应，可以把版本勾选顺序反过来再测一轮，或对同一版本重复多批观察轮间波动。之前单版本分别安装对比时两者几乎一致（差 0.12%），说明这 5% 主要来自同批内的执行顺序与热状态，而非库本身差异。
+注意这个差值不宜直接当成版本改进量：txav1d143 总是先跑，设备温度与频率状态更有利。要排除顺序效应，可以把版本勾选顺序反过来再测一轮，或对同一版本重复多批观察轮间波动。之前单版本分别安装对比时两者几乎一致（差 0.12%），说明这 5% 主要来自同批内的执行顺序与热状态，而非库本身差异。
