@@ -471,6 +471,9 @@
     self.warmupField.textField.text = [NSString stringWithFormat:@"%lu",
                                        (unsigned long)defaults.warmupRounds];
     self.skipField.textField.text = @"0";
+    // 版本号直接取链接进来的库，不让用户手填：切换版本后最容易犯的错
+    // 就是忘了改这栏，导致两版数据被标成同一个名字。
+    self.decoderField.text = defaults.decoderName;
 }
 
 #pragma mark - 码流选择
@@ -1094,6 +1097,10 @@
         // 参数对所有码流一致，只写一次
         BenchStreamResult *first = self.batchResults.firstObject;
         BenchRunConfig *cfg = first.config;
+        // 版本必须出现在报告里：多版本轮测时，没有这一行就无法判断这批数字
+        // 属于哪个解码器实现，事后补标也无从考证。
+        [text appendFormat:@"解码器    : %@\n",
+            cfg.decoderName.length > 0 ? cfg.decoderName : BenchDecoderVersionDescription()];
         [text appendFormat:@"每轮帧数  : %@\n",
             cfg.limitFrames > 0 ? [NSString stringWithFormat:@"%lu", (unsigned long)cfg.limitFrames] : @"全部"];
         [text appendFormat:@"轮次      : %lu 正式 + %lu 预热\n",

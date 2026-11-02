@@ -1,0 +1,33 @@
+//
+//  Version.xcconfig
+//  TXAV1Dec
+//
+//  解码器版本选择。切换版本只改 TXAV1D_VERSION 这一行。
+//
+//  为什么需要这个变量：
+//  libtxav1d 的版本号不在文件名里，而是写在 include/txav1d/vcs_version.h 的
+//  TXAV1D_VERSION 宏里，且 txav1d_core.c 会用 strcmp(txav1d_version(), TXAV1D_VERSION)
+//  校验头文件与库是否来自同一版本。所以「库 + 头文件」必须整体成套切换，
+//  只换 .a 会让运行时版本校验直接失败。
+//
+//  目录约定：
+//  - DecoderSDK/<版本>/  随版本变化的东西（lib/*.a、include/*.h），整套快照
+//  - DecoderTools/       各版本共用的测试代码（tools/*.c 等），只 lib/、
+//                        include/ 之外的公共源码放这里，避免多版本重复编译
+//
+
+// ========== 要测试的解码器版本 ==========
+TXAV1D_VERSION = 1.4.3
+
+// ========== 派生路径，通常不需要改 ==========
+TXAV1D_SDK_DIR = $(PROJECT_DIR)/TXAV1Dec/DecoderSDK/$(TXAV1D_VERSION)
+TXAV1D_TOOLS_DIR = $(PROJECT_DIR)/TXAV1Dec/DecoderTools
+
+// 头文件搜索顺序有讲究：DecoderSDK 在前，保证 vcs_version.h 取到的是
+// 当前选中版本的版本号，而不是残留在别处的旧副本。
+HEADER_SEARCH_PATHS = $(inherited) $(TXAV1D_SDK_DIR)/include $(TXAV1D_SDK_DIR)/include/txav1d $(TXAV1D_TOOLS_DIR) $(TXAV1D_TOOLS_DIR)/tools $(TXAV1D_TOOLS_DIR)/src $(TXAV1D_TOOLS_DIR)/config/ios
+
+// 静态库不再是自动同步组成员（否则多版本会同时被链接），
+// 因此必须显式用 -ltxav1d 指定，链接器从下面的搜索路径里找。
+LIBRARY_SEARCH_PATHS = $(inherited) $(TXAV1D_SDK_DIR)/lib
+OTHER_LDFLAGS = $(inherited) -ltxav1d

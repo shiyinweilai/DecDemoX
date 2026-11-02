@@ -66,6 +66,14 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
+/**
+ * 当前链接进来的解码器版本描述，形如 "txav1d 1.4.3"。
+ *
+ * 取自 txav1d_version() 而非编译期宏，反映的是实际参与链接的库版本。
+ * 多版本切换时用它标注结果，避免手填导致的版本错标。
+ */
+FOUNDATION_EXPORT NSString *BenchDecoderVersionDescription(void);
+
 #pragma mark - 单轮结果
 
 /** 一轮测试的全部指标 */

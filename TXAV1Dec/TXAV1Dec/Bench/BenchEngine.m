@@ -7,6 +7,11 @@
 #import "BenchSystemMetrics.h"
 #import "txav1d_bench.h"
 
+// 版本号在编译期就确定（头文件里的 TXAV1D_VERSION 宏），但真正链接进来的
+// 库版本只有 txav1d_version() 能回答。两者由 txav1d_core.c 的 strcmp 校验，
+// 一旦不一致会直接报错，所以这里读运行时的值作为展示口径更可靠。
+#include "txav1d/txav1d.h"
+
 #include <math.h>
 #include <os/lock.h>
 
@@ -61,11 +66,20 @@
         _warmupRounds = 1;
         _skipFrames = 0;
         _threads = 0;
+        // 版本号自动取自链接进来的库，不用手填：多版本切换后如果靠人工标注，
+        // 极易出现「跑的是 1.4.3、标的是 1.4.2」，而这种错配从数据上看不出来。
+        _decoderName = BenchDecoderVersionDescription();
     }
     return self;
 }
 
 @end
+
+NSString *BenchDecoderVersionDescription(void) {
+    const char *raw = txav1d_version();
+    NSString *version = raw ? @(raw) : @"unknown";
+    return [NSString stringWithFormat:@"txav1d %@", version];
+}
 
 #pragma mark - BenchRoundMetrics
 

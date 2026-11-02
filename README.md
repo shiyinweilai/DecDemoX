@@ -25,21 +25,28 @@ DecDemoX/
         │   └── BenchComponents.{h,m}  # 卡片、指标块、紧凑输入格、输入行、分段行
         ├── streams/                   # 码流目录（构建时自动打包进 App）
         │   └── test3.stream
-        ├── Assets.xcassets / Base.lproj / Info.plist / TXAV1Dec.entitlements
-        └── libtxav1d_arm64/           # txav1d 的 iOS 集成目录
-            ├── include/
-            │   ├── txav1d/            # 公共头文件（txav1d.h / picture.h / data.h 等）
-            │   └── common/            # CLI 源码依赖的 attributes.h、intops.h
+        ├── BuiltinStreams / Assets.xcassets / Base.lproj / Info.plist / TXAV1Dec.entitlements
+        ├── DecoderSDK/                # 解码器版本快照，按版本号分目录
+        │   ├── Version.xcconfig       # 当前测试哪个版本（只改这一行）
+        │   ├── verify_decoder_sdk.sh  # 构建期校验版本一致性
+        │   ├── 1.4.2/
+        │   │   ├── include/           # 公共头文件（txav1d.h / picture.h / vcs_version.h 等）
+        │   │   └── lib/libtxav1d.a    # 该版本的静态库（arm64, iphoneos）
+        │   └── 1.4.3/
+        │       ├── include/
+        │       └── lib/libtxav1d.a
+        └── DecoderTools/              # 各版本共用的测试代码（不随版本变化）
             ├── src/                   # cpu.h、arm/cpu.h（CPU 特性检测声明）
             ├── config/ios/            # config.h、cli_config.h（等价 Meson 生成物）
-            ├── tools/
-            │   ├── txav1d_core.{c,h}  # CLI 风格入口 txav1d_lanuch()
-            │   ├── txav1d_bench.{c,h} # 测速专用入口 txav1d_bench()（App 实际使用）
-            │   ├── txav1d_cli_parse.{c,h}
-            │   ├── input/             # 解封装：ivf / section5 / annexb
-            │   └── output/            # 封装：md5 / yuv / yuv4mpeg2 / null
-            └── lib/libtxav1d.a        # 解码静态库（arm64, iphoneos）
+            └── tools/
+                ├── txav1d_core.{c,h}  # CLI 风格入口 txav1d_lanuch()
+                ├── txav1d_bench.{c,h} # 测速专用入口 txav1d_bench()（App 实际使用）
+                ├── txav1d_cli_parse.{c,h}
+                ├── input/             # 解封装：ivf / section5 / annexb
+                └── output/            # 封装：md5 / yuv / yuv4mpeg2 / null
 ```
+
+`DecoderSDK/<版本>/` 只放「随版本变化」的东西：静态库和公共头文件。`tools/`、`config/`、`src/` 由 Xcode 编译进 App，且各版本之间没有差异，所以放在 `DecoderTools/` 共用。两者分离还有一个硬约束：`DecoderSDK` 不能加入自动同步组，否则多个版本的 `tools/*.c` 会被重复编译、`lib/*.a` 会被同时链接，直接链接失败。
 
 ## 两个解码入口
 
@@ -171,6 +178,40 @@ xcodebuild -project TXAV1Dec.xcodeproj -scheme TXAV1Dec \
 
 4 线程时 CPU 从 100% 升到 193.7%，说明采样确实反映多核并发，而非恒定饱和。
 
-## 上游库更新
+## 解码器多版本切换
 
-`lib/libtxav1d.a` 与 `include/txav1d/*.h` 来自参考仓库 `libtxav1d/ios/arm64/`。若重新编译库，需要同步更新这两处，并确认 `vcs_version.h` 中的版本号与库一致，否则运行时版本校验会失败。
+版本目录与选择变量：
+
+```
+TXAV1Dec/TXAV1Dec/DecoderSDK/
+├── Version.xcconfig      # TXAV1D_VERSION = 1.4.3  ← 切换版本只改这一行
+├── verify_decoder_sdk.sh # 构建期校验，版本不一致直接编译失败
+├── 1.4.2/{include,lib}
+└── 1.4.3/{include,lib}
+```
+
+切换步骤只有一步：改 `DecoderSDK/Version.xcconfig` 里的 `TXAV1D_VERSION`。头文件搜索路径、库搜索路径、`-ltxav1d` 链接参数都由 `Version.xcconfig` 派生，工程配置不用再动。切换后 `txav1d_version()` 会返回对应版本，界面「被测解码器版本」一栏和报告里的 `解码器:` 行都会自动填成实际链接的版本，不需要手改。
+
+**为什么库和头文件必须整套切换**
+
+`vcs_version.h` 里的 `TXAV1D_VERSION` 宏参与编译，而 `txav1d_core.c` 里有 `strcmp(txav1d_version(), TXAV1D_VERSION)` 校验。只换 `.a` 不换头文件，运行时会直接因版本不匹配而失败；反过来只换头文件也没意义，因为版本号来自库本身。
+
+**构建期校验**
+
+`verify_decoder_sdk.sh` 在编译前比对三处：目录名（即 `TXAV1D_VERSION`）、`vcs_version.h` 的宏、静态库里内嵌的版本字符串。任一处不一致就中止构建。这道校验针对的是「换库时只替换了 `.a` 却忘了同步目录名或头文件」这类静默错配，`txav1d_core.c` 的运行时校验覆盖不到目录名。
+
+**新增一个版本**
+
+1. 新建 `DecoderSDK/<新版本>/`，放入 `include/`（整套头文件）和 `lib/libtxav1d.a`
+2. 把 `Version.xcconfig` 的 `TXAV1D_VERSION` 改成新版本号
+
+不需要改 `project.pbxproj`。如果新版本的头文件有结构体布局变化，需要先确认 `DecoderTools/tools/txav1d_bench.c` 仍然兼容，否则测速代码要跟着调整。
+
+**同条件对比结果（iPhone18,2 六核，test3 1080p，200 帧 × 2 轮）**
+
+| 版本 | fps | ms/f | CPU 整机 | 波动% | P95 ms |
+| --- | --- | --- | --- | --- | --- |
+| 1.4.2 | 364.85 | 2.741 | 16.74% | 1.73 | 16.65 |
+| 1.4.3 | 365.30 | 2.737 | 16.73% | 1.09 | 16.40 |
+
+两个版本差异在噪声范围内（0.12%），符合「同一实现换版本号」的预期。这也说明构建期校验确实把正确的库链接了进来，否则不会得到几乎一致的数字。真正的性能变化要看后续包含实际优化的版本。
