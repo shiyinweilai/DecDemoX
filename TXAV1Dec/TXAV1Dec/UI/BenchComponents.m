@@ -489,115 +489,227 @@
 #pragma mark - BenchComparisonView
 
 @interface BenchComparisonView ()
-@property (nonatomic, strong) UIStackView *headerRow;
-@property (nonatomic, strong) UIStackView *bodyStack;
+@property (nonatomic, strong) UIStackView *titleColumn;
+@property (nonatomic, strong) UIScrollView *scrollView;
+@property (nonatomic, strong) UIStackView *contentStack;
+@property (nonatomic, strong) NSLayoutConstraint *contentWidthConstraint;
+@property (nonatomic, assign) NSUInteger columnCount;
+@property (nonatomic, assign) NSInteger emphasizedRow;
+@property (nonatomic, assign) CGFloat lastLayoutWidth;
 @end
 
 @implementation BenchComparisonView
+
+/// 行名固定宽度：六个指标名中最长的「CPU 整机」在 14pt 下约 72pt，
+/// 留到 86pt 可以完整显示而不触发缩字。
+static const CGFloat kTitleColumnWidth = 86.0;
+
+/// 单元格横向内距。列少时会等分铺满，列多时按最小列宽撑开并横向滚动。
+static const CGFloat kColumnGap = 8.0;
+
+/// 单列最小宽度。低于这个宽度时 "123.45" 这类五位数会被压缩到读不清，
+/// 所以宁可滚动也不继续挤。
+static const CGFloat kMinColumnWidth = 74.0;
+
+static const CGFloat kHeaderHeight = 46.0;
+static const CGFloat kRowHeight = 40.0;
 
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (!self) return nil;
 
-    _headerRow = [[UIStackView alloc] init];
-    _headerRow.axis = UILayoutConstraintAxisHorizontal;
-    _headerRow.spacing = 6;
-    _headerRow.distribution = UIStackViewDistributionFill;
+    self.emphasizedRow = -1;
 
-    _bodyStack = [[UIStackView alloc] init];
-    _bodyStack.axis = UILayoutConstraintAxisVertical;
-    _bodyStack.spacing = 5;
+    // 左侧行名列：不放进滚动视图，横向滑动时保持可见。
+    // 否则滑到第 4 列时数字还在、行名走了，那一列就只是六个无法解读的数字。
+    _titleColumn = [[UIStackView alloc] init];
+    _titleColumn.axis = UILayoutConstraintAxisVertical;
+    _titleColumn.spacing = 0;
+    _titleColumn.alignment = UIStackViewAlignmentFill;
+    _titleColumn.translatesAutoresizingMaskIntoConstraints = NO;
+    [_titleColumn.widthAnchor constraintEqualToConstant:kTitleColumnWidth].active = YES;
 
-    UIStackView *root = [[UIStackView alloc] initWithArrangedSubviews:@[_headerRow, _bodyStack]];
-    root.axis = UILayoutConstraintAxisVertical;
-    root.spacing = 6;
-    root.translatesAutoresizingMaskIntoConstraints = NO;
-    [self addSubview:root];
+    _scrollView = [[UIScrollView alloc] init];
+    _scrollView.showsHorizontalScrollIndicator = YES;
+    _scrollView.showsVerticalScrollIndicator = NO;
+    _scrollView.alwaysBounceHorizontal = YES;
+    // 纵向由外层页面负责，这里只消费横向手势，避免和外层滚动互相抢
+    _scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    _scrollView.translatesAutoresizingMaskIntoConstraints = NO;
+
+    _contentStack = [[UIStackView alloc] init];
+    _contentStack.axis = UILayoutConstraintAxisVertical;
+    _contentStack.spacing = 0;
+    _contentStack.alignment = UIStackViewAlignmentFill;
+    _contentStack.translatesAutoresizingMaskIntoConstraints = NO;
+    [_scrollView addSubview:_contentStack];
+
+    id contentGuide = _scrollView.contentLayoutGuide;
+    _contentWidthConstraint = [_contentStack.widthAnchor
+        constraintEqualToAnchor:_scrollView.frameLayoutGuide.widthAnchor
+                       constant:0];
 
     [NSLayoutConstraint activateConstraints:@[
-        [root.topAnchor constraintEqualToAnchor:self.topAnchor],
-        [root.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
-        [root.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
-        [root.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
+        [_contentStack.topAnchor constraintEqualToAnchor:[contentGuide topAnchor]],
+        [_contentStack.leadingAnchor constraintEqualToAnchor:[contentGuide leadingAnchor]],
+        [_contentStack.trailingAnchor constraintEqualToAnchor:[contentGuide trailingAnchor]],
+        [_contentStack.bottomAnchor constraintEqualToAnchor:[contentGuide bottomAnchor]],
+        _contentWidthConstraint,
+        [_scrollView.heightAnchor constraintEqualToConstant:
+            kHeaderHeight + kRowHeight * 6],
+        [_titleColumn.heightAnchor constraintEqualToConstant:
+            kHeaderHeight + kRowHeight * 6],
     ]];
+
+    [self addSubview:_titleColumn];
+    [self addSubview:_scrollView];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [_titleColumn.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+        [_titleColumn.topAnchor constraintEqualToAnchor:self.topAnchor],
+        [_titleColumn.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
+        [_scrollView.leadingAnchor constraintEqualToAnchor:_titleColumn.trailingAnchor],
+        [_scrollView.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+        [_scrollView.topAnchor constraintEqualToAnchor:self.topAnchor],
+        [_scrollView.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
+    ]];
+
     return self;
 }
 
-- (UILabel *)labelWithText:(NSString *)text font:(UIFont *)font color:(UIColor *)color {
+- (UILabel *)labelWithText:(NSString *)text
+                      font:(UIFont *)font
+                     color:(UIColor *)color
+                 alignment:(NSTextAlignment)alignment {
     UILabel *label = [[UILabel alloc] init];
     label.text = text;
     label.font = font;
     label.textColor = color;
-    label.textAlignment = NSTextAlignmentRight;
+    label.textAlignment = alignment;
     label.adjustsFontSizeToFitWidth = YES;
-    label.minimumScaleFactor = 0.75;
+    label.minimumScaleFactor = 0.7;
     label.numberOfLines = 1;
     return label;
 }
 
+/// 行名左侧固定列。高度用固定常量，才能和右侧滚动区的每一行严丝合缝对齐：
+/// 两侧分属不同父视图，无法互相引用高度锚点，靠等值常量是对齐的唯一可靠办法。
+- (void)rebuildTitleColumnWithRowTitles:(NSArray<NSString *> *)rowTitles {
+    for (UIView *view in self.titleColumn.arrangedSubviews) {
+        [self.titleColumn removeArrangedSubview:view];
+        [view removeFromSuperview];
+    }
+
+    // 顶部与右侧表头等高留白，使第一个指标行与第一行数值齐平
+    UIView *headerSpacer = [[UIView alloc] init];
+    [headerSpacer.heightAnchor constraintEqualToConstant:kHeaderHeight].active = YES;
+    [self.titleColumn addArrangedSubview:headerSpacer];
+
+    for (NSString *title in rowTitles) {
+        UILabel *label = [self labelWithText:title
+                                        font:[BenchTheme captionFont]
+                                       color:[BenchTheme secondaryText]
+                                   alignment:NSTextAlignmentLeft];
+        label.numberOfLines = 2;
+        UIView *holder = [[UIView alloc] init];
+        label.translatesAutoresizingMaskIntoConstraints = NO;
+        [holder addSubview:label];
+        [NSLayoutConstraint activateConstraints:@[
+            [holder.heightAnchor constraintEqualToConstant:kRowHeight],
+            [label.leadingAnchor constraintEqualToAnchor:holder.leadingAnchor],
+            [label.trailingAnchor constraintEqualToAnchor:holder.trailingAnchor constant:-6],
+            [label.centerYAnchor constraintEqualToAnchor:holder.centerYAnchor],
+        ]];
+        [self.titleColumn addArrangedSubview:holder];
+    }
+}
+
 - (void)reloadWithHeaders:(NSArray<NSString *> *)headers
                 rowTitles:(NSArray<NSString *> *)rowTitles
-                   values:(NSArray<NSArray<NSString *> *> *)values {
-    for (UIView *view in self.headerRow.arrangedSubviews) {
-        [self.headerRow removeArrangedSubview:view];
-        [view removeFromSuperview];
-    }
-    for (UIView *view in self.bodyStack.arrangedSubviews) {
-        [self.bodyStack removeArrangedSubview:view];
+                   values:(NSArray<NSArray<NSString *> *> *)values
+            emphasizedRow:(NSInteger)emphasizedRow {
+    for (UIView *view in self.contentStack.arrangedSubviews) {
+        [self.contentStack removeArrangedSubview:view];
         [view removeFromSuperview];
     }
 
-    // 结构：每行都是「固定宽度的行名列 + 等分宽度的数值列容器」。
-    // 表头与数据行用完全相同的结构，列宽自然一致；
-    // 不能跨行引用宽度锚点——表头和数据行分属不同父视图，
-    // 没有共同祖先时创建约束会直接抛 NSGenericException。
-    // 行名列宽随字号一起放大：14pt 下 "净内存" 需要约 66pt 才不被压缩，
-    // 名称被缩字是最难读的失败模式，宁可多留几个 pt。
-    const CGFloat titleWidth = 68.0;
-    const CGFloat spacing = 8.0;
+    self.columnCount = headers.count;
+    self.emphasizedRow = emphasizedRow;
+    [self rebuildTitleColumnWithRowTitles:rowTitles];
 
-    UIView *cornerSpacer = [[UIView alloc] init];
-    [cornerSpacer.widthAnchor constraintEqualToConstant:titleWidth].active = YES;
+    // 表头行：每个对象一列。用两行显示（版本 + 码流）而不是单行拼接，
+    // 因为多版本多码流时单行会很长，等分到窄列里必然被截断，
+    // 而列头被截断就分不清哪列是哪个版本。
+    UIStackView *headerRow = [[UIStackView alloc] init];
+    headerRow.axis = UILayoutConstraintAxisHorizontal;
+    headerRow.spacing = kColumnGap;
+    headerRow.distribution = UIStackViewDistributionFillEqually;
+    [headerRow.heightAnchor constraintEqualToConstant:kHeaderHeight].active = YES;
 
-    UIStackView *headerValues = [[UIStackView alloc] init];
-    headerValues.axis = UILayoutConstraintAxisHorizontal;
-    headerValues.spacing = spacing;
-    headerValues.distribution = UIStackViewDistributionFillEqually;
     for (NSString *header in headers) {
-        [headerValues addArrangedSubview:[self labelWithText:header
-                                                       font:[BenchTheme captionFont]
-                                                      color:[BenchTheme secondaryText]]];
+        UILabel *label = [self labelWithText:header
+                                        font:[UIFont systemFontOfSize:12 weight:UIFontWeightMedium]
+                                       color:[BenchTheme secondaryText]
+                                   alignment:NSTextAlignmentCenter];
+        label.numberOfLines = 2;
+        // 列头跟随横向滚动，用户滑到右侧时仍能看到这一列属于哪个版本
+        [headerRow addArrangedSubview:label];
     }
-    [self.headerRow addArrangedSubview:cornerSpacer];
-    [self.headerRow addArrangedSubview:headerValues];
+    [self.contentStack addArrangedSubview:headerRow];
 
     for (NSUInteger row = 0; row < rowTitles.count; row++) {
         UIStackView *line = [[UIStackView alloc] init];
         line.axis = UILayoutConstraintAxisHorizontal;
-        line.spacing = spacing;
-
-        UILabel *title = [self labelWithText:rowTitles[row]
-                                        font:[BenchTheme captionFont]
-                                       color:[BenchTheme secondaryText]];
-        title.textAlignment = NSTextAlignmentLeft;
-        [line addArrangedSubview:title];
-        [title.widthAnchor constraintEqualToConstant:titleWidth].active = YES;
-
-        UIStackView *valueCells = [[UIStackView alloc] init];
-        valueCells.axis = UILayoutConstraintAxisHorizontal;
-        valueCells.spacing = spacing;
-        valueCells.distribution = UIStackViewDistributionFillEqually;
+        line.spacing = kColumnGap;
+        line.distribution = UIStackViewDistributionFillEqually;
+        [line.heightAnchor constraintEqualToConstant:kRowHeight].active = YES;
 
         NSArray<NSString *> *cells = row < values.count ? values[row] : @[];
-        for (NSString *cell in cells) {
-            // 数值用等宽字体，不同行的数字才能纵向对齐
-            [valueCells addArrangedSubview:[self labelWithText:cell
-                                                          font:[BenchTheme monoFontOfSize:14]
-                                                         color:[BenchTheme primaryText]]];
+        const BOOL emphasized = (NSInteger)row == self.emphasizedRow;
+        for (NSUInteger col = 0; col < headers.count; col++) {
+            NSString *text = col < cells.count ? cells[col] : @"--";
+            // 首行 fps 用强调色：它是选型时最先看的数字，
+            // 其余指标降为常规主文字色，避免整张表都是强调色反而没有重点。
+            UILabel *label = [self labelWithText:text
+                                            font:emphasized
+                                                 ? [UIFont monospacedDigitSystemFontOfSize:16
+                                                                                   weight:UIFontWeightSemibold]
+                                                 : [BenchTheme monoFontOfSize:15]
+                                           color:emphasized ? [BenchTheme accent]
+                                                            : [BenchTheme primaryText]
+                                       alignment:NSTextAlignmentCenter];
+            [line addArrangedSubview:label];
         }
-        [line addArrangedSubview:valueCells];
-        [self.bodyStack addArrangedSubview:line];
+        [self.contentStack addArrangedSubview:line];
+
+        // 行间分隔线：六行数字等宽等距排布，没有横线时视线容易串行
+        if (row + 1 < rowTitles.count) {
+            UIView *separator = [[UIView alloc] init];
+            separator.backgroundColor = [BenchTheme separator];
+            [separator.heightAnchor constraintEqualToConstant:0.5].active = YES;
+            [self.contentStack addArrangedSubview:separator];
+        }
     }
+
+    [self setNeedsLayout];
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+
+    const CGFloat available = CGRectGetWidth(self.scrollView.bounds);
+    if (available <= 0 || available == self.lastLayoutWidth) return;
+    self.lastLayoutWidth = available;
+
+    const NSUInteger columns = MAX(self.columnCount, (NSUInteger)1);
+    // 列少时等分铺满可视宽度（3~4 列能舒展开）；
+    // 列多到每列低于最小宽度时停止压缩，改为撑开内容让用户横向滑动。
+    // 直接等分会在 6 列以上时把每列压到 40pt 左右，数字必然被缩小到读不出。
+    const CGFloat byEqualSplit = (available - kColumnGap * (columns - 1)) / columns;
+    const CGFloat columnWidth = MAX(byEqualSplit, kMinColumnWidth);
+    const CGFloat required = columnWidth * columns + kColumnGap * (columns - 1);
+
+    self.contentWidthConstraint.constant = MAX(required - available, 0);
 }
 
 @end

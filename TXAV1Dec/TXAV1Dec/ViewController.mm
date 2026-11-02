@@ -5,6 +5,7 @@
 
 #import "ViewController.h"
 #import "BenchEngine.h"
+#import "BenchDecoderLoader.h"
 #import "BenchSystemMetrics.h"
 #import "BenchTheme.h"
 #import "BenchComponents.h"
@@ -113,25 +114,53 @@
 
 #pragma mark - 单码流结果
 
-/** 一个码流的完整测试结果，多码流批量测试后用于横向对比 */
+/** 一个「版本 × 码流」组合的完整测试结果，批量测试后用于横向对比 */
 @interface BenchStreamResult : NSObject
 
 @property (nonatomic, strong) BenchStream *stream;
+@property (nonatomic, strong) BenchDecoder *decoder;
 @property (nonatomic, strong) BenchRunConfig *config;
 @property (nonatomic, strong) NSArray<BenchRoundMetrics *> *rounds;
 @property (nonatomic, strong) BenchSummary *summary;
 
+/** 码流名（不含扩展名），用于列头 */
+- (NSString *)streamDisplayName;
+
+/** 版本号，如 "1.4.3" */
+- (NSString *)decoderDisplayName;
+
+/**
+ * 列头文本。
+ *
+ * 单码流时只需要码流名；跨版本对比时，同一码流会出现多列，
+ * 必须把版本号一起放进列头，否则两列完全同名、无法分辨。
+ */
 - (NSString *)displayName;
 
 @end
 
 @implementation BenchStreamResult
 
-- (NSString *)displayName {
+- (NSString *)streamDisplayName {
     NSString *name = self.stream.name ?: self.config.streamName ?: @"未知码流";
     // 对比表列头空间有限，去掉扩展名让列宽更可控
     return name.stringByDeletingPathExtension.length > 0
         ? name.stringByDeletingPathExtension : name;
+}
+
+- (NSString *)decoderDisplayName {
+    return self.decoder.version ?: @"未知版本";
+}
+
+/**
+ * 组合名，单行。
+ *
+ * 对比表列头是单行标签（numberOfLines = 1），换行会被截断成一行半，
+ * 所以这里用中点连接而不是两行。
+ */
+- (NSString *)displayName {
+    return [NSString stringWithFormat:@"%@ · %@",
+            [self decoderDisplayName], [self streamDisplayName]];
 }
 
 @end
@@ -157,9 +186,13 @@
 @property (nonatomic, strong) BenchCompactField *roundsField;
 @property (nonatomic, strong) BenchCompactField *warmupField;
 @property (nonatomic, strong) BenchCompactField *skipField;
-@property (nonatomic, strong) UITextField *decoderField;
 @property (nonatomic, strong) BenchSegmentRow *threadSegment;
 @property (nonatomic, strong) BenchSegmentRow *affinitySegment;
+
+// 解码器选择：与码流一样用弹出多选，版本列表来自构建产物而非硬编码
+@property (nonatomic, strong) BenchStreamPickerRow *decoderPickerRow;
+@property (nonatomic, strong) NSArray<BenchDecoder *> *decoders;
+@property (nonatomic, strong) NSMutableArray<BenchDecoder *> *selectedDecoders;
 
 // 操作
 @property (nonatomic, strong) UIButton *startButton;
@@ -168,17 +201,29 @@
 
 // 结果
 @property (nonatomic, strong) BenchCardView *resultCard;
-@property (nonatomic, strong) UILabel *resultStreamLabel;
-@property (nonatomic, strong) BenchMetricTile *fpsTile;
-@property (nonatomic, strong) BenchMetricTile *mspfTile;
-@property (nonatomic, strong) BenchMetricTile *cpuTile;
-@property (nonatomic, strong) BenchMetricTile *memoryTile;
-@property (nonatomic, strong) BenchMetricTile *jitterTile;
-@property (nonatomic, strong) BenchMetricTile *p95Tile;
-@property (nonatomic, strong) UIStackView *singleResultStack;
-@property (nonatomic, strong) BenchComparisonView *comparisonView;
-@property (nonatomic, strong) UILabel *stabilityLabel;
-@property (nonatomic, strong) UILabel *detailLabel;
+
+/**
+ * 指标矩阵：6 行主要指标 × N 列对象。
+ *
+ * 主要指标固定六项（fps、单帧耗时、CPU、波动、P95、净内存），
+ * 被比较的对象数量不定（版本 × 码流的组合），因此指标做行、对象做列。
+ * 这样加一个版本或多勾一个码流只是多一列，布局不用重排。
+ */
+@property (nonatomic, strong) BenchComparisonView *matrixView;
+
+/**
+ * 波动与 P95 的口径说明，紧贴表格下方。
+ *
+ * 这两个指标名字本身不足以自解释：「波动」看不出是帧间抖动还是轮间离散，
+ * 「P95」不写清百分位方向也会被读成「最慢的 5% 有多慢」。
+ * 单独一行说明比塞进行标题更合适——行标题列只有 86pt，
+ * 塞进注释必然被压缩或换行成三行，反而破坏六行的对齐。
+ */
+@property (nonatomic, strong) UILabel *metricLegendLabel;
+
+/** 矩阵下方按组合罗列的次要信息，每个组合一行 */
+@property (nonatomic, strong) UILabel *secondaryLabel;
+
 @property (nonatomic, strong) UIButton *reportCopyButton;
 @property (nonatomic, copy) NSString *reportText;
 
@@ -189,11 +234,26 @@
 
 // 批量测试状态
 @property (nonatomic, strong) NSMutableArray<BenchStreamResult *> *batchResults;
-@property (nonatomic, strong) NSMutableArray<BenchStream *> *pendingStreams;
 @property (nonatomic, strong) NSMutableArray<NSString *> *failedStreamNames;
 @property (nonatomic, assign) NSUInteger batchTotal;
 @property (nonatomic, assign) BOOL batchCancelled;
 @property (nonatomic, strong) BenchRunConfig *lastConfig;
+
+/**
+ * 待测「解码器 × 码流」组合队列。
+ *
+ * 多版本多码流时总轮数是两者之积，只用一个码流队列无法表达「换版本重跑
+ * 同一码流」这个维度，所以把组合展开成扁平队列：每项自带解码器与码流，
+ * 顺序执行即可保证同版本的各码流连续跑完，减少库加载切换带来的干扰。
+ */
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *pendingCombinations;
+
+/** 当前正在执行的组合，供阶段文案与失败信息使用 */
+@property (nonatomic, strong) NSDictionary *activeCombination;
+
+/** 本批实际参与的解码器数量，用于进度与报告标题 */
+@property (nonatomic, assign) NSUInteger batchDecoderCount;
+@property (nonatomic, assign) NSUInteger batchStreamCount;
 
 @end
 
@@ -211,8 +271,10 @@
     self.streams = @[];
     self.selectedStreams = [NSMutableArray array];
     self.batchResults = [NSMutableArray array];
-    self.pendingStreams = [NSMutableArray array];
     self.failedStreamNames = [NSMutableArray array];
+    self.pendingCombinations = [NSMutableArray array];
+    self.decoders = @[];
+    self.selectedDecoders = [NSMutableArray array];
 
     [self buildScrollHierarchy];
     [self buildDeviceHeader];
@@ -379,29 +441,15 @@
                                     action:@selector(streamPickerTapped)
                           forControlEvents:UIControlEventTouchUpInside];
 
-    // 被测解码器名：横向对比必须知道这组数字属于哪个版本。
-    // 说明文字不能省：占位符在填入内容后消失，之后就看不出这栏是什么了。
-    UILabel *decoderCaption = [[UILabel alloc] init];
-    decoderCaption.text = @"被测解码器版本";
-    decoderCaption.font = [BenchTheme captionFont];
-    decoderCaption.textColor = [BenchTheme secondaryText];
-
-    self.decoderField = [[UITextField alloc] init];
-    self.decoderField.placeholder = @"如 av1d 1.4.1";
-    self.decoderField.font = [UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
-    self.decoderField.textColor = [BenchTheme primaryText];
-    self.decoderField.backgroundColor = [BenchTheme accentSoft];
-    self.decoderField.layer.cornerRadius = 8;
-    self.decoderField.layer.cornerCurve = kCACornerCurveContinuous;
-    self.decoderField.returnKeyType = UIReturnKeyDone;
-    self.decoderField.delegate = self;
-    UIView *decoderPad = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 10, 34)];
-    self.decoderField.leftView = decoderPad;
-    self.decoderField.leftViewMode = UITextFieldViewModeAlways;
-    [self.decoderField.heightAnchor constraintEqualToConstant:36].active = YES;
+    // 解码器版本与码流一样用弹出多选：版本列表来自 App 包内的 dylib，
+    // 新增版本只需往 DecoderSDK 放目录并重新编译，界面不用改。
+    self.decoderPickerRow = [[BenchStreamPickerRow alloc] initWithTitle:@"解码器版本（可多选）"];
+    [self.decoderPickerRow.button addTarget:self
+                                     action:@selector(decoderPickerTapped)
+                           forControlEvents:UIControlEventTouchUpInside];
 
     UIStackView *targetDetail = [[UIStackView alloc] initWithArrangedSubviews:@[
-        self.streamPickerRow, decoderCaption, self.decoderField
+        self.streamPickerRow, self.decoderPickerRow
     ]];
     targetDetail.axis = UILayoutConstraintAxisVertical;
     targetDetail.spacing = 8;
@@ -471,9 +519,144 @@
     self.warmupField.textField.text = [NSString stringWithFormat:@"%lu",
                                        (unsigned long)defaults.warmupRounds];
     self.skipField.textField.text = @"0";
-    // 版本号直接取链接进来的库，不让用户手填：切换版本后最容易犯的错
-    // 就是忘了改这栏，导致两版数据被标成同一个名字。
-    self.decoderField.text = defaults.decoderName;
+    [self reloadDecoders];
+}
+
+#pragma mark - 解码器选择
+
+/**
+ * 扫描 App 包内的解码器动态库并刷新选择状态。
+ *
+ * 版本列表来自构建产物（Frameworks 下的 libtxav1d_<版本>.dylib），
+ * 不是硬编码清单，所以新增版本后重新编译即自动出现。
+ */
+- (void)reloadDecoders {
+    self.decoders = [BenchDecoderLibrary availableDecoders];
+
+    // 默认只勾选第一个可用版本：全选会让首次测试的耗时成倍增长，
+    // 而绝大多数时候用户只是想测最新版本。
+    [self.selectedDecoders removeAllObjects];
+    for (BenchDecoder *decoder in self.decoders) {
+        if (decoder.isUsable) {
+            [self.selectedDecoders addObject:decoder];
+            break;
+        }
+    }
+
+    [self refreshDecoderPickerDisplay];
+    [self updateStartButtonState];
+}
+
+- (void)refreshDecoderPickerDisplay {
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    for (BenchDecoder *decoder in self.selectedDecoders) {
+        [names addObject:decoder.version];
+    }
+    [self.decoderPickerRow updateWithSelectedNames:names];
+    [self refreshTargetSummary];
+}
+
+- (void)decoderPickerTapped {
+    [self dismissKeyboard];
+    if (self.engine.isRunning) return;
+
+    // 第一行是标题说明，不参与选择；版本全部不可用时给出明确指引，
+    // 否则用户只会看到空列表，不知道是构建失败还是没放库。
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"选择解码器版本"
+                                                                  message:@"可多选，将依次跑完每个版本的每个码流"
+                                                           preferredStyle:UIAlertControllerStyleActionSheet];
+
+    if (self.decoders.count == 0) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"未找到解码器，请检查构建"
+                                                  style:UIAlertActionStyleCancel
+                                                handler:nil]];
+    }
+
+    for (BenchDecoder *decoder in self.decoders) {
+        const BOOL selected = [self.selectedDecoders containsObject:decoder];
+        // 不可用的版本仍然列出但标注原因：静默隐藏会让人误以为构建漏了某个版本，
+        // 实际是那个版本的库有问题。
+        NSString *title;
+        if (decoder.isUsable) {
+            title = [NSString stringWithFormat:@"%@ %@  ·  %@",
+                     selected ? @"✓" : @"　",
+                     decoder.version,
+                     decoder.buildStamp.length > 0 ? decoder.buildStamp : @"已加载"];
+        } else {
+            title = [NSString stringWithFormat:@"✕ %@  ·  %@",
+                     decoder.version,
+                     decoder.loadError ?: @"不可用"];
+        }
+        UIAlertAction *action = [UIAlertAction actionWithTitle:title
+                                                         style:UIAlertActionStyleDefault
+                                                       handler:^(UIAlertAction *a) {
+            if (!decoder.isUsable) {
+                [self showAlertWithTitle:[NSString stringWithFormat:@"%@ 不可用", decoder.version]
+                                 message:decoder.loadError ?: @"未知原因"];
+                return;
+            }
+            [self toggleDecoder:decoder];
+        }];
+        [sheet addAction:action];
+    }
+
+    [sheet addAction:[UIAlertAction actionWithTitle:@"仅选最新版本"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) {
+        [self.selectedDecoders removeAllObjects];
+        for (BenchDecoder *decoder in self.decoders) {
+            if (decoder.isUsable) {
+                [self.selectedDecoders addObject:decoder];
+                break;
+            }
+        }
+        [self refreshDecoderPickerDisplay];
+        [self updateStartButtonState];
+    }]];
+
+    // 「全选」在对比场景里最常用：一次性把所有版本都跑一遍才能横向对比
+    [sheet addAction:[UIAlertAction actionWithTitle:@"全选（对比所有版本）"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) {
+        [self.selectedDecoders removeAllObjects];
+        for (BenchDecoder *decoder in self.decoders) {
+            if (decoder.isUsable) [self.selectedDecoders addObject:decoder];
+        }
+        [self refreshDecoderPickerDisplay];
+        [self updateStartButtonState];
+    }]];
+
+    [sheet addAction:[UIAlertAction actionWithTitle:@"完成"
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
+
+    if (sheet.popoverPresentationController) {
+        sheet.popoverPresentationController.sourceView = self.decoderPickerRow;
+        sheet.popoverPresentationController.sourceRect = self.decoderPickerRow.bounds;
+    }
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)toggleDecoder:(BenchDecoder *)decoder {
+    if ([self.selectedDecoders containsObject:decoder]) {
+        [self.selectedDecoders removeObject:decoder];
+    } else {
+        [self.selectedDecoders addObject:decoder];
+        // 保持与版本库一致的降序，避免用户按点击顺序得到 1.4.2、1.4.3 交替的
+        // 结果列表，那种顺序会让对比表列序随点击顺序漂移。
+        [self.selectedDecoders sortUsingComparator:^NSComparisonResult(BenchDecoder *a, BenchDecoder *b) {
+            return [a.version compare:b.version options:NSNumericSearch];
+        }];
+    }
+    [self refreshDecoderPickerDisplay];
+    [self updateStartButtonState];
+
+    // 选择变化后重新弹出，支持连续勾选多个版本
+    if (self.presentedViewController) {
+        [self dismissViewControllerAnimated:NO completion:^{
+            [self decoderPickerTapped];
+        }];
+    }
 }
 
 #pragma mark - 码流选择
@@ -522,9 +705,19 @@
  * 解码器名没填时明确显示「未标注」，避免看起来像漏了。
  */
 - (void)refreshTargetSummary {
-    NSString *decoder = self.decoderField.text.length > 0
-        ? self.decoderField.text
-        : @"解码器未标注";
+    NSString *decoderPart;
+    if (self.selectedDecoders.count == 0) {
+        decoderPart = @"未选解码器";
+    } else if (self.selectedDecoders.count == 1) {
+        decoderPart = self.selectedDecoders.firstObject.version;
+    } else {
+        // 多选时显示首尾版本号比只给数量更有信息量：
+        // 一眼能看出测的是哪两个版本，而不是"3 个版本"这种无法核对的摘要。
+        decoderPart = [NSString stringWithFormat:@"%@~%@ %lu 版",
+                       self.selectedDecoders.lastObject.version,
+                       self.selectedDecoders.firstObject.version,
+                       (unsigned long)self.selectedDecoders.count];
+    }
 
     NSString *streamPart;
     if (self.selectedStreams.count == 0) {
@@ -536,7 +729,7 @@
                       (unsigned long)self.selectedStreams.count];
     }
 
-    [self.targetRow setSummary:[NSString stringWithFormat:@"%@ · %@", decoder, streamPart]];
+    [self.targetRow setSummary:[NSString stringWithFormat:@"%@ · %@", decoderPart, streamPart]];
 }
 
 - (void)targetRowTapped {
@@ -698,37 +891,61 @@
         return;
     }
 
+    if (self.selectedDecoders.count == 0) {
+        [self showAlertWithTitle:@"没有选择解码器"
+                         message:@"请点开「解码器版本」选择至少一个版本。若列表为空，说明构建产物里没有可用的解码器动态库。"];
+        return;
+    }
+
     // 每次开跑前清空上一轮，避免新旧结果混在一起
     [self.batchResults removeAllObjects];
     [self.failedStreamNames removeAllObjects];
+    [self.pendingCombinations removeAllObjects];
     self.reportText = nil;
     self.reportCopyButton.enabled = NO;
     self.resultCard.hidden = YES;
     self.batchCancelled = NO;
-    self.batchTotal = self.selectedStreams.count;
-    self.pendingStreams = [self.selectedStreams mutableCopy];
+    self.activeCombination = nil;
+    self.batchDecoderCount = self.selectedDecoders.count;
+    self.batchStreamCount = self.selectedStreams.count;
+
+    // 组合展开顺序：外层版本、内层码流。这样同一版本的多个码流连续跑完，
+    // 避免频繁切换库；而库切换本身也不贵（只 dlopen 一次），所以顺序影响很小。
+    for (BenchDecoder *decoder in self.selectedDecoders) {
+        for (BenchStream *stream in self.selectedStreams) {
+            [self.pendingCombinations addObject:@{@"decoder": decoder, @"stream": stream}];
+        }
+    }
+
+    self.batchTotal = self.pendingCombinations.count;
 
     [self setRunningUI:YES];
     [self runNextStreamInBatch];
 }
 
-/// 取出待测队列里的下一个码流开跑；队列空则收尾
+/// 取出待测队列里的下一个「版本 × 码流」组合开跑；队列空则收尾
 - (void)runNextStreamInBatch {
-    if (self.batchCancelled || self.pendingStreams.count == 0) {
+    if (self.batchCancelled || self.pendingCombinations.count == 0) {
         [self finishBatch];
         return;
     }
 
-    BenchStream *stream = self.pendingStreams.firstObject;
-    [self.pendingStreams removeObjectAtIndex:0];
+    NSDictionary *combination = self.pendingCombinations.firstObject;
+    [self.pendingCombinations removeObjectAtIndex:0];
+    self.activeCombination = combination;
 
-    const NSUInteger overallIndex = self.batchTotal - self.pendingStreams.count;
+    BenchDecoder *decoder = combination[@"decoder"];
+    BenchStream *stream = combination[@"stream"];
+
+    const NSUInteger overallIndex = self.batchTotal - self.pendingCombinations.count;
+    // 多组合时前缀带上版本号：只给序号的话，用户看不出当前跑的是哪个版本，
+    // 而多版本测试恰恰最需要这个信息。
     NSString *prefix = self.batchTotal > 1
-        ? [NSString stringWithFormat:@"[%lu/%lu] ",
-           (unsigned long)overallIndex, (unsigned long)self.batchTotal]
+        ? [NSString stringWithFormat:@"[%lu/%lu] %@ ",
+           (unsigned long)overallIndex, (unsigned long)self.batchTotal, decoder.version]
         : @"";
 
-    BenchRunConfig *config = [self buildConfigForStream:stream];
+    BenchRunConfig *config = [self buildConfigForStream:stream decoder:decoder];
     self.lastConfig = config;
 
     __weak typeof(self) weakSelf = self;
@@ -747,12 +964,15 @@
         if (!self) return;
 
         if (error) {
-            // 单个码流失败不该中断整批，记录后继续下一个
-            [self.failedStreamNames addObject:[NSString stringWithFormat:@"%@: %@",
-                                               stream.name, error]];
+            // 单个组合失败不该中断整批，记录后继续下一个。
+            // 版本号必须带上：多版本测试里"某个码流失败"必须能定位到具体版本，
+            // 否则两个版本一好一坏时会看不出是谁的问题。
+            [self.failedStreamNames addObject:[NSString stringWithFormat:@"%@ / %@: %@",
+                                               decoder.version, stream.name, error]];
         } else if (rounds.count > 0) {
             BenchStreamResult *result = [[BenchStreamResult alloc] init];
             result.stream = stream;
+            result.decoder = decoder;
             result.config = config;
             result.rounds = rounds;
             result.summary = [BenchSummary summaryWithRounds:rounds];
@@ -763,7 +983,8 @@
     }];
 }
 
-- (BenchRunConfig *)buildConfigForStream:(BenchStream *)stream {
+- (BenchRunConfig *)buildConfigForStream:(BenchStream *)stream
+                                 decoder:(BenchDecoder *)decoder {
     BenchRunConfig *config = [[BenchRunConfig alloc] init];
     config.streamPath = stream.path;
     config.streamName = stream.name;
@@ -773,7 +994,10 @@
     config.skipFrames = (NSUInteger)MAX([self.skipField integerValueWithFallback:0], 0);
     config.threads = [self threadCountFromSegment];
     config.schedulePolicy = [self schedulePolicyFromSegment];
-    config.decoderName = self.decoderField.text.length > 0 ? self.decoderField.text : nil;
+    // 解码器实例与展示名一起绑定：名称取自实际加载的那个库，
+    // 而不是用户填的文本，杜绝"跑 A 标 B"。
+    config.decoder = decoder;
+    config.decoderName = decoder.displayName;
 
     // 输入 0 表示跑满整个码流
     if (self.framesField.textField.text.integerValue == 0) {
@@ -837,17 +1061,19 @@
     }
     self.threadSegment.segmentedControl.enabled = !running;
     self.affinitySegment.segmentedControl.enabled = !running;
-    self.decoderField.enabled = !running;
+    self.decoderPickerRow.button.enabled = !running;
     self.streamPickerRow.button.enabled = !running;
     self.reportCopyButton.enabled = !running && self.reportText.length > 0;
 }
 
 - (void)updateStartButtonState {
     if (self.engine.isRunning) return;
-    const BOOL hasStream = self.selectedStreams.count > 0;
-    self.startButton.enabled = hasStream;
+    // 解码器也必须选中：只选了码流却没选版本时按钮就该是灰的，
+    // 否则点下去才弹提示，多一次无效操作。
+    const BOOL ready = self.selectedStreams.count > 0 && self.selectedDecoders.count > 0;
+    self.startButton.enabled = ready;
     UIButtonConfiguration *config = self.startButton.configuration;
-    config.baseBackgroundColor = hasStream ? [BenchTheme accent] : [UIColor tertiaryLabelColor];
+    config.baseBackgroundColor = ready ? [BenchTheme accent] : [UIColor tertiaryLabelColor];
     self.startButton.configuration = config;
 }
 
@@ -879,52 +1105,28 @@
     headerRow.spacing = 8;
 
     // 当前码流名：批量测试时需要知道下面这组数字属于哪个码流
-    self.resultStreamLabel = [[UILabel alloc] init];
-    self.resultStreamLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    self.resultStreamLabel.textColor = [BenchTheme primaryText];
-    self.resultStreamLabel.numberOfLines = 1;
-    self.resultStreamLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    // 主要指标区：固定六行，被比较的对象做列。
+    // 单对象也用同一套矩阵，避免「一个结果用格子、多个结果用表格」导致
+    // 两种视觉形态来回切换，用户每次都要重新找数字在哪。
+    self.matrixView = [[BenchComparisonView alloc] initWithFrame:CGRectZero];
 
-    const CGFloat tileFont = 24.0;
-    // 六个格子按「判读顺序」排：帧率、单帧耗时决定快不快；
-    // CPU 决定贵不贵；波动、P95 决定稳不稳；净内存决定会不会被杀。
-    // 波动原本只是脚注里的一串数字，但「稳不稳」是解码器选型的独立维度，
-    // 快而抖动大的实现同样不能用，所以提到指标位单独占一格。
-    self.fpsTile = [[BenchMetricTile alloc] initWithCaption:@"解码帧率" valueFontSize:tileFont];
-    self.mspfTile = [[BenchMetricTile alloc] initWithCaption:@"单帧耗时" valueFontSize:tileFont];
-    self.cpuTile = [[BenchMetricTile alloc] initWithCaption:@"CPU 占用（整机）" valueFontSize:tileFont];
-    self.memoryTile = [[BenchMetricTile alloc] initWithCaption:@"解码器净内存" valueFontSize:tileFont];
-    self.jitterTile = [[BenchMetricTile alloc] initWithCaption:@"波动" valueFontSize:tileFont];
-    self.p95Tile = [[BenchMetricTile alloc] initWithCaption:@"P95 单帧" valueFontSize:tileFont];
+    // 次要信息：口径、轮次、demux/decode 拆分、分辨率、线程峰值等。
+    // 这些是核对数字时才需要的，放在表格下方并按组合分组，
+    // 主表保持六行干净，一眼就能比较出谁快谁省。
+    self.secondaryLabel = [[UILabel alloc] init];
+    self.secondaryLabel.font = [BenchTheme monoFontOfSize:12];
+    self.secondaryLabel.textColor = [BenchTheme secondaryText];
+    self.secondaryLabel.numberOfLines = 0;
 
-    [self.memoryTile setFootnote:@"峰值 - 基线"];
-
-    UIStackView *row1 = [self metricRowWithViews:@[self.fpsTile, self.mspfTile, self.cpuTile]];
-    UIStackView *row2 = [self metricRowWithViews:@[self.jitterTile, self.p95Tile, self.memoryTile]];
-
-    // 这两段是口径与上下文，属于「要读得清才敢下结论」的信息，
-    // 之前 12pt / 10pt 是全屏最小的字号，反而最难核对，统一提到 14pt。
-    self.stabilityLabel = [[UILabel alloc] init];
-    self.stabilityLabel.font = [BenchTheme captionFont];
-    self.stabilityLabel.textColor = [BenchTheme secondaryText];
-    self.stabilityLabel.numberOfLines = 0;
-
-    self.detailLabel = [[UILabel alloc] init];
-    self.detailLabel.font = [BenchTheme monoFontOfSize:13];
-    self.detailLabel.textColor = [BenchTheme secondaryText];
-    self.detailLabel.numberOfLines = 0;
-
-    self.singleResultStack = [[UIStackView alloc] initWithArrangedSubviews:@[
-        self.resultStreamLabel, row1, row2, self.stabilityLabel, self.detailLabel
-    ]];
-    self.singleResultStack.axis = UILayoutConstraintAxisVertical;
-    self.singleResultStack.spacing = 10;
-
-    self.comparisonView = [[BenchComparisonView alloc] initWithFrame:CGRectZero];
-    self.comparisonView.hidden = YES;
+    // 波动与 P95 的口径说明。字号比正文小一档、颜色用次要色，
+    // 让它读起来像注释而不是第七个指标，避免抢走六行主表的注意力。
+    self.metricLegendLabel = [[UILabel alloc] init];
+    self.metricLegendLabel.font = [UIFont systemFontOfSize:11];
+    self.metricLegendLabel.textColor = [BenchTheme secondaryText];
+    self.metricLegendLabel.numberOfLines = 0;
 
     UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[
-        headerRow, self.singleResultStack, self.comparisonView
+        headerRow, self.matrixView, self.metricLegendLabel, self.secondaryLabel
     ]];
     stack.axis = UILayoutConstraintAxisVertical;
     stack.spacing = 12;
@@ -935,111 +1137,23 @@
     [self.rootStack addArrangedSubview:card];
 }
 
-- (UIStackView *)metricRowWithViews:(NSArray<UIView *> *)views {
-    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:views];
-    row.axis = UILayoutConstraintAxisHorizontal;
-    row.distribution = UIStackViewDistributionFillEqually;
-    row.alignment = UIStackViewAlignmentTop;
-    row.spacing = 12;
-    return row;
-}
-
-/// 批量结果统一在这里渲染：单码流显示详细指标，多码流额外附对比表
+/// 批量结果统一在这里渲染：主指标进矩阵，其余信息进下方明细
 - (void)presentBatchResults {
-    BenchStreamResult *primary = self.batchResults.lastObject;
-
-    if (self.batchResults.count == 1) {
-        [self presentSingleResult:primary];
-        self.comparisonView.hidden = YES;
-    } else {
-        // 多码流时，主指标区展示最后一个码流，并明确标注是哪个，
-        // 避免用户把某一行的数字误当成整体汇总
-        [self presentSingleResult:primary];
-        [self presentComparison];
-        self.comparisonView.hidden = NO;
-    }
+    [self presentMatrix];
 
     self.reportText = [self buildBatchReportText];
     self.reportCopyButton.enabled = YES;
     self.resultCard.hidden = NO;
 }
 
-- (void)presentSingleResult:(BenchStreamResult *)result {
-    BenchSummary *summary = result.summary;
-    BenchRoundMetrics *last = result.rounds.lastObject;
-
-    self.resultStreamLabel.text = result.displayName;
-
-    if (summary.scoredCount == 0) {
-        self.stabilityLabel.text = @"仅有预热轮，未产生有效统计";
-        for (BenchMetricTile *tile in @[self.fpsTile, self.mspfTile, self.cpuTile,
-                                        self.memoryTile, self.jitterTile, self.p95Tile]) {
-            [tile setValue:@"--" unit:nil];
-        }
-        return;
-    }
-
-    [self.fpsTile setValue:[NSString stringWithFormat:@"%.2f", summary.decodeFPS]
-                      unit:@"fps"
-                  emphasis:YES];
-    if (summary.speedRatio > 0) {
-        [self.fpsTile setFootnote:[NSString stringWithFormat:@"%.2fx 源帧率", summary.speedRatio]];
-    }
-
-    [self.mspfTile setValue:[NSString stringWithFormat:@"%.3f", summary.avgFrameMs]
-                       unit:@"ms"];
-
-    // CPU 主值用整机占比：这是「这个 App 吃了我多少 CPU」最直觉的答案，
-    // 也是跨机型唯一能直接对比的量（单核口径在 6 核机器上会到 500%，
-    // 和任务管理器的观感对不上）。次要信息只给单核占比本身，
-    // 不再并出「核心数」——0.84 核就是 84% 除以 100，同一件事说两遍是噪音。
-    [self.cpuTile setValue:[NSString stringWithFormat:@"%.1f", summary.cpuSharePercent]
-                      unit:@"%"];
-    [self.cpuTile setFootnote:[NSString stringWithFormat:@"%.0f%% 单核口径",
-                               summary.avgCPUPercent]];
-
-    // 净内存才是解码器自己的开销，绝对值放脚注
-    [self.memoryTile setValue:[NSString stringWithFormat:@"%.1f", summary.footprintDeltaMB]
-                         unit:@"MB"];
-    [self.memoryTile setFootnote:[NSString stringWithFormat:@"峰值 %.0f MB",
-                                  summary.peakFootprintMB]];
-
-    // 波动 = 轮间标准差 / 均值。放在指标位是为了让「稳不稳」和「快不快」
-    // 同等可见：只相差 1% 的两档实现，波动差 5% 才是选型的决定因素。
-    // 用两位小数：稳定实现的波动常在 0.3%~1% 之间，一位小数会把 0.52 和 0.61
-    // 都显示成 0.5/0.6，刚好丢掉需要判断的那点差别。
-    [self.jitterTile setValue:[NSString stringWithFormat:@"%.2f", summary.fluctuationPercent]
-                         unit:@"%"];
-    [self.jitterTile setFootnote:[NSString stringWithFormat:@"±%.3f ms", summary.stddevFrameMs]];
-
-    [self.p95Tile setValue:[NSString stringWithFormat:@"%.2f", last.p95FrameMs]
-                      unit:@"ms"];
-
-    // 波动的绝对值已有独立指标格，这里只留轮次范围和极值，不再重复百分比
-    self.stabilityLabel.text = [NSString stringWithFormat:
-        @"%lu 轮 · 最快 %.3f / 最慢 %.3f ms · P50 %.3f ms",
-        (unsigned long)summary.scoredCount,
-        summary.minAvgFrameMs,
-        summary.maxAvgFrameMs,
-        last.p50FrameMs];
-
-    if (last) {
-        self.detailLabel.text = [NSString stringWithFormat:
-            @"%@ · 源帧率 %.2f fps · 解码 %lu/%lu 帧 · demux %.1f ms · decode %.1f ms · "
-            @"峰值线程 %ld · resident 峰 %.0f MB",
-            last.resolutionDescription,
-            last.sourceFPS,
-            (unsigned long)last.decodedFrames,
-            (unsigned long)last.totalFrames,
-            last.demuxMs,
-            last.decodeMs,
-            (long)last.peakThreadCount,
-            summary.peakResidentMB];
-    }
-}
-
-/// 多码流对比表：行是指标，列是码流
-- (void)presentComparison {
+/**
+ * 渲染六行主要指标矩阵。
+ *
+ * 列 = 每个「版本 × 码流」组合。列头分两行显示版本与码流：
+ * 多版本多码流时组合数会到十几个，单行标题在等分列宽下必然被截断，
+ * 而列头一旦看不清就分不出哪列是哪个版本。
+ */
+- (void)presentMatrix {
     NSMutableArray<NSString *> *headers = [NSMutableArray array];
     NSMutableArray<NSString *> *fps = [NSMutableArray array];
     NSMutableArray<NSString *> *mspf = [NSMutableArray array];
@@ -1048,8 +1162,17 @@
     NSMutableArray<NSString *> *p95 = [NSMutableArray array];
     NSMutableArray<NSString *> *memory = [NSMutableArray array];
 
+    // 列头默认只放版本：同一轮测试的码流与参数是对齐的，码流名对每一列都一样，
+    // 重复 N 遍既不提供信息，还要占掉列头一半宽度、把版本名挤小。
+    // 只有同时勾了多个码流时才补上码流名——否则同一个版本会出现两列同名，
+    // 那两列数字必然不同，读者无从判断谁是谁，这种歧义比多一行更糟。
+    const BOOL needStreamInHeader = self.batchStreamCount > 1;
+
     for (BenchStreamResult *result in self.batchResults) {
-        [headers addObject:result.displayName];
+        [headers addObject:needStreamInHeader
+            ? [NSString stringWithFormat:@"%@\n%@",
+               result.decoderDisplayName, result.streamDisplayName]
+            : result.decoderDisplayName];
         BenchSummary *s = result.summary;
         if (s.scoredCount == 0) {
             for (NSMutableArray *column in @[fps, mspf, cpu, jitter, p95, memory]) {
@@ -1059,20 +1182,88 @@
         }
         [fps addObject:[NSString stringWithFormat:@"%.1f", s.decodeFPS]];
         [mspf addObject:[NSString stringWithFormat:@"%.2f", s.avgFrameMs]];
-        // 与指标格同口径：CPU 用整机占比，波动用轮间变异系数。
-        // 对比表用两位小数：整机占比的分辨率被核数摊薄了，6 核机上
+        // CPU 用整机占比，与报告同口径。两位小数：6 核机上整机占比
         // 一位小数只有 0.6% 单核的精度，两档实现并列时常显示成同一个数。
-        [cpu addObject:[NSString stringWithFormat:@"%.2f", s.cpuSharePercent]];
-        [jitter addObject:[NSString stringWithFormat:@"%.2f", s.fluctuationPercent]];
+        [cpu addObject:[NSString stringWithFormat:@"%.2f%%", s.cpuSharePercent]];
+        [jitter addObject:[NSString stringWithFormat:@"%.2f%%", s.fluctuationPercent]];
         [p95 addObject:[NSString stringWithFormat:@"%.2f",
                         result.rounds.lastObject.p95FrameMs]];
         [memory addObject:[NSString stringWithFormat:@"%.1f", s.footprintDeltaMB]];
     }
 
-    // 列按判读顺序：快不快 → 稳不稳 → 贵不贵
-    [self.comparisonView reloadWithHeaders:headers
-                                 rowTitles:@[@"fps", @"ms/f", @"CPU%", @"波动%", @"P95", @"净内存"]
-                                    values:@[fps, mspf, cpu, jitter, p95, memory]];
+    // 行序即判读顺序：快不快 → 贵不贵 → 稳不稳。
+    // 净内存提到第 4 行，波动与 P95 落到第 5、6 行：
+    // 前四个是每次挑选版本都必看的量，波动和 P95 用于进一步挑刺，
+    // 放在尾部既不打断主线，又能固定占据最后两行便于纵向扫视。
+    [self.matrixView reloadWithHeaders:headers
+                             rowTitles:@[@"解码帧率 fps", @"单帧耗时 ms", @"CPU 整机",
+                                         @"净内存 MB", @"波动", @"P95 ms"]
+                                values:@[fps, mspf, cpu, memory, jitter, p95]
+                         emphasizedRow:0];
+
+    self.metricLegendLabel.text =
+        @"波动 = 轮间标准差 ÷ 均值。反复跑同一版本时每轮结果的离散程度，反映测试是否稳定；"
+        @"它不是帧与帧之间的抖动。有效轮次不足 2 轮时为 0.00%，只说明样本不够，不代表稳定。\n"
+        @"P95 = 最后一轮内全部帧耗时排序后的第 95 百分位，即 95% 的帧不慢于该值。"
+        @"它反映帧间抖动，平均值被大量正常帧摊平后看不出偶发长帧，P95 能暴露出来。";
+
+    self.secondaryLabel.text = [self buildSecondaryInfoText];
+}
+
+/**
+ * 表格下方的次要信息。
+ *
+ * 每个组合一段，只在多组合时加标题行以示区分；单组合时省略标题，
+ * 避免只有一列却多出一行没有信息量的名字。
+ */
+- (NSString *)buildSecondaryInfoText {
+    NSMutableArray<NSString *> *blocks = [NSMutableArray array];
+    const BOOL multi = self.batchResults.count > 1;
+
+    for (BenchStreamResult *result in self.batchResults) {
+        BenchSummary *s = result.summary;
+        BenchRoundMetrics *last = result.rounds.lastObject;
+        NSMutableArray<NSString *> *lines = [NSMutableArray array];
+
+        if (multi) {
+            // 与列头一致：单码流时码流名对每段都相同，不必重复；
+            // 多码流时必须带上，否则分不清这段明细属于哪个码流。
+            [lines addObject:self.batchStreamCount > 1
+                ? [NSString stringWithFormat:@"%@ · %@",
+                   result.decoderDisplayName, result.streamDisplayName]
+                : result.decoderDisplayName];
+        }
+
+        if (s.scoredCount == 0) {
+            [lines addObject:@"  仅有预热轮，未产生有效统计"];
+            [blocks addObject:[lines componentsJoinedByString:@"\n"]];
+            continue;
+        }
+
+        // 用「口径 + 绝对值」并列：整机占比和单核口径是同一件事的两种说法，
+        // 但跨机型对比只能用整机占比，排查 CPU 是否被打满却要看单核口径。
+        [lines addObject:[NSString stringWithFormat:
+            @"  CPU %.1f%% 整机 = %.0f%% 单核口径 · 净内存 峰值 %.0f MB",
+            s.cpuSharePercent, s.avgCPUPercent, s.peakFootprintMB]];
+        [lines addObject:[NSString stringWithFormat:
+            @"  %lu 轮 · 最快 %.3f / 最慢 %.3f ms · P50 %.3f ms · 波动 ±%.3f ms",
+            (unsigned long)s.scoredCount, s.minAvgFrameMs, s.maxAvgFrameMs,
+            last.p50FrameMs, s.stddevFrameMs]];
+        if (last) {
+            [lines addObject:[NSString stringWithFormat:
+                @"  %@ · 源 %.2f fps · 解码 %lu/%lu 帧 · demux %.1f ms · decode %.1f ms",
+                last.resolutionDescription, last.sourceFPS,
+                (unsigned long)last.decodedFrames, (unsigned long)last.totalFrames,
+                last.demuxMs, last.decodeMs]];
+            [lines addObject:[NSString stringWithFormat:
+                @"  峰值线程 %ld · resident 峰 %.0f MB",
+                (long)last.peakThreadCount, s.peakResidentMB]];
+        }
+
+        [blocks addObject:[lines componentsJoinedByString:@"\n"]];
+    }
+
+    return [blocks componentsJoinedByString:@"\n\n"];
 }
 
 /// 批量测试的报告文本：每个码流一段，末尾附对比表
@@ -1083,8 +1274,20 @@
         BenchStreamResult *result = self.batchResults.firstObject;
         [text appendString:[result.summary textReportWithConfig:result.config]];
     } else {
-        [text appendFormat:@"===== txav1d 多码流对比测试 (%lu 个) =====\n",
-            (unsigned long)self.batchResults.count];
+        // 标题里写明规模：多版本多码流时，"12 个组合"远比"12 个"有信息量，
+        // 读者能立刻知道这张表是两个维度的笛卡尔积。
+        if (self.batchDecoderCount > 1 && self.batchStreamCount > 1) {
+            [text appendFormat:@"===== txav1d 多版本 × 多码流对比 (%lu 版本 × %lu 码流 = %lu 组合) =====\n",
+                (unsigned long)self.batchDecoderCount,
+                (unsigned long)self.batchStreamCount,
+                (unsigned long)self.batchResults.count];
+        } else if (self.batchDecoderCount > 1) {
+            [text appendFormat:@"===== txav1d 多版本对比测试 (%lu 个版本) =====\n",
+                (unsigned long)self.batchResults.count];
+        } else {
+            [text appendFormat:@"===== txav1d 多码流对比测试 (%lu 个) =====\n",
+                (unsigned long)self.batchResults.count];
+        }
         [text appendFormat:@"设备      : %@ (%@)\n",
             [BenchSystemMetrics deviceName], [BenchSystemMetrics machineIdentifier]];
         [text appendFormat:@"CPU       : %@\n", [BenchSystemMetrics coreTopologyDescription]];
@@ -1094,13 +1297,23 @@
                                            dateStyle:NSDateFormatterMediumStyle
                                            timeStyle:NSDateFormatterMediumStyle]];
 
-        // 参数对所有码流一致，只写一次
+        // 参数对所有组合一致，只写一次
         BenchStreamResult *first = self.batchResults.firstObject;
         BenchRunConfig *cfg = first.config;
-        // 版本必须出现在报告里：多版本轮测时，没有这一行就无法判断这批数字
-        // 属于哪个解码器实现，事后补标也无从考证。
-        [text appendFormat:@"解码器    : %@\n",
-            cfg.decoderName.length > 0 ? cfg.decoderName : BenchDecoderVersionDescription()];
+        // 多版本时逐个列出参与版本：只写"多个版本"等于没写，
+        // 事后根本无法确认这批数字覆盖了哪些库。
+        if (self.batchDecoderCount > 1) {
+            NSMutableArray<NSString *> *versions = [NSMutableArray array];
+            for (BenchDecoder *decoder in self.selectedDecoders) {
+                [versions addObject:decoder.version];
+            }
+            [text appendFormat:@"解码器    : %lu 个版本（%@）\n",
+                (unsigned long)versions.count,
+                [versions componentsJoinedByString:@", "]];
+        } else {
+            [text appendFormat:@"解码器    : %@\n",
+                cfg.decoderName.length > 0 ? cfg.decoderName : BenchDecoderVersionDescription()];
+        }
         [text appendFormat:@"每轮帧数  : %@\n",
             cfg.limitFrames > 0 ? [NSString stringWithFormat:@"%lu", (unsigned long)cfg.limitFrames] : @"全部"];
         [text appendFormat:@"轮次      : %lu 正式 + %lu 预热\n",
@@ -1126,7 +1339,8 @@
                                            startingAtIndex:0]];
         };
 
-        appendPadded(@"码流", 22);
+        appendPadded(@"版本", 10);
+        appendPadded(@"码流", 20);
         appendPadded(@"fps", 9);
         appendPadded(@"ms/f", 9);
         appendPadded(@"CPU%", 9);
@@ -1138,7 +1352,8 @@
         for (BenchStreamResult *result in self.batchResults) {
             BenchSummary *s = result.summary;
             if (s.scoredCount == 0) continue;
-            appendPadded(result.displayName, 22);
+            appendPadded(result.decoderDisplayName, 10);
+            appendPadded(result.streamDisplayName, 20);
             appendPadded([NSString stringWithFormat:@"%.2f", s.decodeFPS], 9);
             appendPadded([NSString stringWithFormat:@"%.3f", s.avgFrameMs], 9);
             appendPadded([NSString stringWithFormat:@"%.2f", s.cpuSharePercent], 9);
@@ -1151,9 +1366,66 @@
 
         [text appendString:@"\n（CPU% 为整机占比；波动% = 轮间标准差/均值，越低越稳定）\n"];
 
-        [text appendString:@"\n---------- 逐码流明细 ----------\n"];
+        // 同码流跨版本对比：这才是多版本测试真正要看的表。
+        // 上面的表按组合罗列，要自己横着找同一个码流的两行再比，
+        // 版本一多就容易错位，所以直接把「相对基准版本的提升」算出来。
+        if (self.batchDecoderCount > 1 && self.batchStreamCount >= 1) {
+            [text appendString:@"\n---------- 跨版本提升 ----------\n"];
+            [text appendFormat:@"基准 = %@（各版本相对它的 fps 与 CPU 变化）\n",
+                self.selectedDecoders.lastObject.version];
+
+            for (BenchStream *stream in self.selectedStreams) {
+                NSMutableArray<BenchStreamResult *> *rows = [NSMutableArray array];
+                for (BenchStreamResult *result in self.batchResults) {
+                    if ([result.stream.name isEqualToString:stream.name]) {
+                        [rows addObject:result];
+                    }
+                }
+                if (rows.count < 2) continue;
+
+                BenchSummary *baseline = rows.lastObject.summary;
+                if (baseline.scoredCount == 0 || baseline.decodeFPS <= 0) continue;
+
+                [text appendFormat:@"\n--- %@ ---\n", rows.lastObject.streamDisplayName];
+                appendPadded(@"版本", 10);
+                appendPadded(@"fps", 9);
+                appendPadded(@"fps变化", 11);
+                appendPadded(@"CPU%", 9);
+                appendPadded(@"CPU变化", 11);
+                appendPadded(@"ms/f", 9);
+                [text appendString:@"\n"];
+
+                for (BenchStreamResult *result in rows) {
+                    BenchSummary *s = result.summary;
+                    if (s.scoredCount == 0) continue;
+                    const double fpsDelta = (s.decodeFPS / baseline.decodeFPS - 1.0) * 100.0;
+                    NSString *fpsChange = fabs(fpsDelta) < 0.05
+                        ? @"持平" : [NSString stringWithFormat:@"%+.1f%%", fpsDelta];
+
+                    NSString *cpuChange = @"--";
+                    if (baseline.cpuSharePercent > 0) {
+                        const double cpuDelta =
+                            (s.cpuSharePercent / baseline.cpuSharePercent - 1.0) * 100.0;
+                        cpuChange = fabs(cpuDelta) < 0.05
+                            ? @"持平" : [NSString stringWithFormat:@"%+.1f%%", cpuDelta];
+                    }
+
+                    appendPadded(result.decoderDisplayName, 10);
+                    appendPadded([NSString stringWithFormat:@"%.2f", s.decodeFPS], 9);
+                    appendPadded(fpsChange, 11);
+                    appendPadded([NSString stringWithFormat:@"%.2f", s.cpuSharePercent], 9);
+                    appendPadded(cpuChange, 11);
+                    appendPadded([NSString stringWithFormat:@"%.3f", s.avgFrameMs], 9);
+                    [text appendString:@"\n"];
+                }
+            }
+            [text appendString:@"\n（fps 越高越好，CPU% 越低越好；变化幅度在测量波动内即为持平）\n"];
+        }
+
+        [text appendString:@"\n---------- 逐组合明细 ----------\n"];
         for (BenchStreamResult *result in self.batchResults) {
-            [text appendFormat:@"\n--- %@ ---\n", result.displayName];
+            [text appendFormat:@"\n--- %@ / %@ ---\n",
+                result.decoderDisplayName, result.streamDisplayName];
             BenchSummary *s = result.summary;
             [text appendFormat:@"单帧 %.4f ms  P95 %.4f ms  fps %.2f  %@\n",
                 s.avgFrameMs,
@@ -1211,10 +1483,8 @@
 #pragma mark - UITextFieldDelegate
 
 - (void)textFieldDidEndEditing:(UITextField *)textField {
-    // 解码器名是折叠区摘要的一部分，改完要立刻反映到收起态
-    if (textField == self.decoderField) {
-        [self refreshTargetSummary];
-    }
+    // 数值输入框改完会直接影响批量规模，刷新折叠区摘要时无需额外处理；
+    // 解码器已改为多选行，不再经过这里。
 }
 
 - (BOOL)textFieldShouldReturn:(UITextField *)textField {
@@ -1299,6 +1569,8 @@
            [BenchSystemMetrics machineIdentifier]);
     append(@"可用码流 %lu 个，已选 %lu 个",
            (unsigned long)self.streams.count, (unsigned long)self.selectedStreams.count);
+    append(@"可用解码器 %lu 个，已选 %lu 个",
+           (unsigned long)self.decoders.count, (unsigned long)self.selectedDecoders.count);
 
     // 自测默认全选，才能覆盖多码流批量与对比表路径
     if ([[NSProcessInfo processInfo].arguments containsObject:@"--all-streams"]) {
@@ -1307,8 +1579,27 @@
         append(@"已全选 %lu 个码流", (unsigned long)self.selectedStreams.count);
     }
 
+    // --all-decoders 用来验证多版本同测这条新路径：
+    // 一个 App 内同时加载多个 dylib，逐一跑同一码流并出对比表。
+    if ([[NSProcessInfo processInfo].arguments containsObject:@"--all-decoders"]) {
+        [self.selectedDecoders removeAllObjects];
+        for (BenchDecoder *decoder in self.decoders) {
+            if (decoder.isUsable) [self.selectedDecoders addObject:decoder];
+        }
+        [self refreshDecoderPickerDisplay];
+        append(@"已全选 %lu 个解码器", (unsigned long)self.selectedDecoders.count);
+    }
+
     if (self.selectedStreams.count == 0) {
         append(@"失败：没有选中码流");
+        [self writeSelfTestLog:log];
+        return;
+    }
+    if (self.selectedDecoders.count == 0) {
+        append(@"失败：没有可用的解码器动态库");
+        for (BenchDecoder *decoder in self.decoders) {
+            append(@"  %@ -> %@", decoder.version, decoder.loadError ?: @"可用");
+        }
         [self writeSelfTestLog:log];
         return;
     }
@@ -1321,9 +1612,19 @@
 
     [self.batchResults removeAllObjects];
     [self.failedStreamNames removeAllObjects];
+    [self.pendingCombinations removeAllObjects];
     self.batchCancelled = NO;
-    self.batchTotal = self.selectedStreams.count;
-    self.pendingStreams = [self.selectedStreams mutableCopy];
+    self.batchDecoderCount = self.selectedDecoders.count;
+    self.batchStreamCount = self.selectedStreams.count;
+
+    // 与 startButtonTapped 保持完全一致的展开顺序，避免自测走一条
+    // 生产代码不会走的路径，导致验证结论与实际行为脱节。
+    for (BenchDecoder *decoder in self.selectedDecoders) {
+        for (BenchStream *stream in self.selectedStreams) {
+            [self.pendingCombinations addObject:@{@"decoder": decoder, @"stream": stream}];
+        }
+    }
+    self.batchTotal = self.pendingCombinations.count;
 
     // 自测固定用轻量参数，避免真机上跑太久
     self.framesField.textField.text = framesIndex != NSNotFound && framesIndex + 1 < args.count
@@ -1367,7 +1668,7 @@
         __strong typeof(weakSelf) self = weakSelf;
         if (!self) return;
 
-        if (self.engine.isRunning || self.pendingStreams.count > 0) {
+        if (self.engine.isRunning || self.pendingCombinations.count > 0) {
             [self pollSelfTestUntilFinished:log append:append];
             return;
         }

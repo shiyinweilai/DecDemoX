@@ -2,32 +2,32 @@
 //  Version.xcconfig
 //  TXAV1Dec
 //
-//  解码器版本选择。切换版本只改 TXAV1D_VERSION 这一行。
+//  解码器多版本构建配置。
 //
-//  为什么需要这个变量：
-//  libtxav1d 的版本号不在文件名里，而是写在 include/txav1d/vcs_version.h 的
-//  TXAV1D_VERSION 宏里，且 txav1d_core.c 会用 strcmp(txav1d_version(), TXAV1D_VERSION)
-//  校验头文件与库是否来自同一版本。所以「库 + 头文件」必须整体成套切换，
-//  只换 .a 会让运行时版本校验直接失败。
+//  与早期单版本方案的区别：
+//  以前用 TXAV1D_VERSION 选中一个版本，App 静态链接它的 libtxav1d.a。
+//  现在改为把 DecoderSDK 下「每个版本目录」分别编成一个独立动态库，
+//  运行时由界面选择要跑哪些版本，因此 TXAV1D_VERSION 不再参与选择。
+//
+//  为什么必须用动态库：
+//  libtxav1d.a 各版本导出的全局符号几乎完全相同（实测 1.4.2 与 1.4.3
+//  有 885 个同名符号）。静态链接进同一个 App 一定重定义冲突，
+//  「一个 App 内同时测多个版本」在技术上只有动态库这一条路。
 //
 //  目录约定：
-//  - DecoderSDK/<版本>/  随版本变化的东西（lib/*.a、include/*.h），整套快照
-//  - DecoderTools/       各版本共用的测试代码（tools/*.c 等），只 lib/、
-//                        include/ 之外的公共源码放这里，避免多版本重复编译
+//  - DecoderSDK/<版本>/   放 lib/libtxav1d.a + include/，目录名即版本号
+//  - DecoderTools/        各版本共用的 bench 源码，被编进每个 dylib
 //
 
-// ========== 要测试的解码器版本 ==========
-TXAV1D_VERSION = 1.4.3
-
-// ========== 派生路径，通常不需要改 ==========
-TXAV1D_SDK_DIR = $(PROJECT_DIR)/TXAV1Dec/DecoderSDK/$(TXAV1D_VERSION)
+// ========== 派生路径 ==========
+TXAV1D_SDK_DIR = $(PROJECT_DIR)/TXAV1Dec/DecoderSDK
 TXAV1D_TOOLS_DIR = $(PROJECT_DIR)/TXAV1Dec/DecoderTools
 
-// 头文件搜索顺序有讲究：DecoderSDK 在前，保证 vcs_version.h 取到的是
-// 当前选中版本的版本号，而不是残留在别处的旧副本。
-HEADER_SEARCH_PATHS = $(inherited) $(TXAV1D_SDK_DIR)/include $(TXAV1D_SDK_DIR)/include/txav1d $(TXAV1D_TOOLS_DIR) $(TXAV1D_TOOLS_DIR)/tools $(TXAV1D_TOOLS_DIR)/src $(TXAV1D_TOOLS_DIR)/config/ios
+// App 自身源码只需要 txav1d_bench.h（纯 C 结构体声明），
+// 不再需要解码库的 include —— 那些头文件已经随库一起编进 dylib 了。
+// 这一点很关键：App 完全不接触 Txav1dContext / Txav1dPicture 等内部
+// 结构体，将来库改内存布局也不会影响 App 的 ABI。
+HEADER_SEARCH_PATHS = $(inherited) $(TXAV1D_TOOLS_DIR)/tools
 
-// 静态库不再是自动同步组成员（否则多版本会同时被链接），
-// 因此必须显式用 -ltxav1d 指定，链接器从下面的搜索路径里找。
-LIBRARY_SEARCH_PATHS = $(inherited) $(TXAV1D_SDK_DIR)/lib
-OTHER_LDFLAGS = $(inherited) -ltxav1d
+// 故意不写 LIBRARY_SEARCH_PATHS 与 -ltxav1d：
+// 静态库由构建脚本打进 dylib，App 通过 dlopen 使用，不再直接链接。

@@ -5,12 +5,7 @@
 
 #import "BenchEngine.h"
 #import "BenchSystemMetrics.h"
-#import "txav1d_bench.h"
-
-// 版本号在编译期就确定（头文件里的 TXAV1D_VERSION 宏），但真正链接进来的
-// 库版本只有 txav1d_version() 能回答。两者由 txav1d_core.c 的 strcmp 校验，
-// 一旦不一致会直接报错，所以这里读运行时的值作为展示口径更可靠。
-#include "txav1d/txav1d.h"
+#import "BenchDecoderLoader.h"
 
 #include <math.h>
 #include <os/lock.h>
@@ -66,7 +61,7 @@
         _warmupRounds = 1;
         _skipFrames = 0;
         _threads = 0;
-        // 版本号自动取自链接进来的库，不用手填：多版本切换后如果靠人工标注，
+        // 版本号取自实际要跑的那个 dylib，不用手填：多版本轮测时若靠人工标注，
         // 极易出现「跑的是 1.4.3、标的是 1.4.2」，而这种错配从数据上看不出来。
         _decoderName = BenchDecoderVersionDescription();
     }
@@ -76,9 +71,9 @@
 @end
 
 NSString *BenchDecoderVersionDescription(void) {
-    const char *raw = txav1d_version();
-    NSString *version = raw ? @(raw) : @"unknown";
-    return [NSString stringWithFormat:@"txav1d %@", version];
+    BenchDecoder *decoder = [BenchDecoderLibrary preferredDecoder];
+    if (!decoder) return @"txav1d（无可用版本）";
+    return decoder.displayName;
 }
 
 #pragma mark - BenchRoundMetrics
@@ -460,12 +455,24 @@ NSString *BenchDecoderVersionDescription(void) {
     const NSUInteger skipFrames = config.skipFrames;
     const NSInteger threads = config.threads;
     const BenchSchedulePolicy schedulePolicy = config.schedulePolicy;
+    BenchDecoder *decoder = config.decoder ?: [BenchDecoderLibrary preferredDecoder];
     NSString *streamPath = [config.streamPath copy];
 
     if (streamPath.length == 0) {
         self.running = NO;
         dispatch_async(dispatch_get_main_queue(), ^{
             onCompletion(@[], @"未选择码流文件");
+        });
+        return;
+    }
+
+    // 没有可用解码器时立即失败：继续跑只会得到一串空结果，
+    // 让人误以为是性能问题而不是构建问题。
+    if (!decoder.isUsable) {
+        self.running = NO;
+        NSString *reason = decoder.loadError ?: @"未找到可用的解码器动态库";
+        dispatch_async(dispatch_get_main_queue(), ^{
+            onCompletion(@[], reason);
         });
         return;
     }
@@ -502,7 +509,8 @@ NSString *BenchDecoderVersionDescription(void) {
                                                                 limit:limitFrames
                                                                  skip:skipFrames
                                                               threads:threads
-                                                       schedulePolicy:schedulePolicy];
+                                                       schedulePolicy:schedulePolicy
+                                                              decoder:decoder];
             if (!metrics) {
                 fatalError = @"解码失败，请检查码流是否有效";
                 break;
@@ -543,7 +551,8 @@ NSString *BenchDecoderVersionDescription(void) {
                                   limit:config.limitFrames
                                    skip:config.skipFrames
                                 threads:config.threads
-                         schedulePolicy:config.schedulePolicy];
+                         schedulePolicy:config.schedulePolicy
+                                decoder:config.decoder];
 }
 
 /**
@@ -556,7 +565,8 @@ NSString *BenchDecoderVersionDescription(void) {
                                         limit:(NSUInteger)limitFrames
                                          skip:(NSUInteger)skipFrames
                                       threads:(NSInteger)threads
-                               schedulePolicy:(BenchSchedulePolicy)schedulePolicy {
+                               schedulePolicy:(BenchSchedulePolicy)schedulePolicy
+                                      decoder:(BenchDecoder *)decoder {
     Txav1dBenchConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.input_file = path.UTF8String;
@@ -598,7 +608,16 @@ NSString *BenchDecoderVersionDescription(void) {
     // 派生工作线程，子线程继承创建时刻的 QoS，所以在这里设置能影响它们。
     [BenchSystemMetrics applySchedulePolicyToCurrentThread:schedulePolicy];
 
-    const int status = txav1d_bench(&cfg, &result);
+    // 解码器缺失说明构建产物里没有任何可用版本；直接失败并给出原因，
+    // 比拿一个空指针继续跑更容易定位问题。
+    if (!decoder.isUsable) {
+        os_unfair_lock_lock(&_sampleLock);
+        self.samplingActive = NO;
+        os_unfair_lock_unlock(&_sampleLock);
+        return nil;
+    }
+
+    const int status = [decoder runBenchWithConfig:&cfg result:&result];
 
     os_unfair_lock_lock(&_sampleLock);
     self.samplingActive = NO;
@@ -646,7 +665,9 @@ NSString *BenchDecoderVersionDescription(void) {
         metrics.avgResidentMB = residentSum / (double)memorySamples;
     }
 
-    txav1d_bench_free_result(&result);
+    // 逐帧数组由 dylib 内部 malloc 分配，必须由同一个库释放：
+    // 换 App 侧释放或跨版本释放会破坏堆。
+    [decoder freeBenchResult:&result];
 
     if (status != 0) return nil;
     return metrics;

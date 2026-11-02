@@ -9,6 +9,8 @@
 
 #import "BenchSystemMetrics.h"
 
+@class BenchDecoder;
+
 NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark - 码流
@@ -63,6 +65,14 @@ NS_ASSUME_NONNULL_BEGIN
  * 解码器名字，否则过几天就看不出这组数字属于哪个版本。
  */
 @property (nonatomic, copy, nullable) NSString *decoderName;
+
+/**
+ * 本次测试使用哪个解码器版本（动态库实例）。
+ *
+ * 为空时退回 preferredDecoder（最新的可用版本）。多版本轮测时为每个组合
+ * 显式指定，保证结果与真实执行的库严格对应。
+ */
+@property (nonatomic, strong, nullable) BenchDecoder *decoder;
 
 @end
 

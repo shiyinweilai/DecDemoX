@@ -148,23 +148,31 @@ NS_ASSUME_NONNULL_BEGIN
 #pragma mark - 多码流对比
 
 /**
- * 多码流横向对比表。
+ * 指标矩阵：6 行指标 × N 列对象。
  *
- * 批量测试多个码流后，把关键指标按行排成一张紧凑表，便于一眼看出
- * 哪个码流更吃力、哪个解码器更省 CPU。列数自适应：码流少时不留空列。
+ * 为什么是行指标、列对象：主要指标固定只有 6 项，而被比较的对象
+ * （解码器版本、码流组合）数量不定，将来可能 3~4 个甚至更多。
+ * 指标做行、对象做列，新增对象只是多一列，不用重排布局；
+ * 反过来做（指标横排、每个对象一组格子）在对象变多时行数会膨胀，
+ * 每块格子也越来越窄，最终挤到读不出数字。
+ *
+ * 指标名列固定在左侧不参与横向滚动，只有数值列滚动：横向滑到第 4 列时
+ * 仍能知道这一行是 fps 还是 CPU，否则数字脱离行名就没有意义。
  */
 @interface BenchComparisonView : UIView
 
 /**
- * 刷新对比内容。
+ * 刷新矩阵内容。
  *
- * @param headers   列标题（每个码流一列）
- * @param rowTitles 行名（每个指标一行）
- * @param values    与 rowTitles 对应的各列数值文本
+ * @param headers       列标题（每列一个对象），可用 \n 分两行显示版本与码流
+ * @param rowTitles     行名（固定 6 个主要指标）
+ * @param values        与 rowTitles 对应的各列数值文本，values[行][列]
+ * @param emphasizedRow 需要用强调色突出的行（-1 表示不突出），一般为首行 fps
  */
 - (void)reloadWithHeaders:(NSArray<NSString *> *)headers
                 rowTitles:(NSArray<NSString *> *)rowTitles
-                   values:(NSArray<NSArray<NSString *> *> *)values;
+                   values:(NSArray<NSArray<NSString *> *> *)values
+            emphasizedRow:(NSInteger)emphasizedRow;
 
 @end
 
