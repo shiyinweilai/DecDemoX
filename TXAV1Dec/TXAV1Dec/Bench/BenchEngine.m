@@ -337,18 +337,16 @@
     }
     [text appendFormat:@"平均单帧耗时  : %.4f ms/f\n", self.avgFrameMs];
     [text appendFormat:@"最快/最慢轮次 : %.4f / %.4f ms/f\n", self.minAvgFrameMs, self.maxAvgFrameMs];
-    [text appendFormat:@"轮间标准差    : %.4f ms/f (%.2f%%)\n", self.stddevFrameMs, self.fluctuationPercent];
+    [text appendFormat:@"波动          : %.2f%%（轮间标准差 %.4f ms/f）← 越低越稳定\n",
+        self.fluctuationPercent, self.stddevFrameMs];
 
-    // 三种口径并列，单核百分比放首位：它是 Instruments 同款口径，精度也最高
+    // 整机占比放首位：这是「这 App 吃了多少 CPU」的直觉答案，也是跨机型唯一可比的量。
+    // 单核口径与核心数随后并出，需要和 Instruments 对照时用它们换算。
     const NSInteger cores = [BenchSystemMetrics processorCount];
-    [text appendFormat:@"平均 CPU      : %.1f%% 单核口径 = %.2f 核 = 整机 %.1f%%\n",
-        self.avgCPUPercent, self.avgCPUCores, self.cpuSharePercent];
+    [text appendFormat:@"平均 CPU      : 整机 %.1f%% = %.0f%% 单核口径 = %.2f 核（本机 %ld 核）\n",
+        self.cpuSharePercent, self.avgCPUPercent, self.avgCPUCores, (long)cores];
     [text appendFormat:@"峰值 CPU      : %.1f%% 单核口径 = %.2f 核\n",
         self.peakCPUPercent, self.peakCPUCores];
-    [text appendFormat:@"              （100%% = 占满 1 核，本机 %ld 核；整机占比 = 核心数/%ld）\n",
-        (long)cores, (long)cores];
-    [text appendFormat:@"每帧 CPU 成本 : %.5f 核·秒/帧  ← 横向对比看这个，越低越高效\n",
-        self.cpuSecondsPerFrame];
 
     // 内存：绝对值回答「会不会被杀」，增量回答「解码器自己占多少」
     BenchRoundMetrics *baselineSample = self.scoredRounds.firstObject;
@@ -360,11 +358,15 @@
     [text appendFormat:@"内存 resident : 峰 %.1f MB（交叉验证，噪声较大）\n", self.peakResidentMB];
 
     [text appendString:@"\n---------- 逐轮明细 ----------\n"];
+    const NSInteger roundCores = [BenchSystemMetrics processorCount];
     for (BenchRoundMetrics *r in self.scoredRounds) {
+        // 逐轮也用整机占比：明细和上方汇总必须是同一把尺子，
+        // 否则同一份报告里两个百分数会互相矛盾。单核口径并列在括号里备查。
         [text appendFormat:@"#%lu  %.4f ms/f  P50 %.4f  P95 %.4f  "
-                           @"CPU %.1f%%(%.2f核)  净内存 %.1fMB\n",
+                           @"CPU 整机 %.1f%%(%.1f%% 单核)  净内存 %.1fMB\n",
             (unsigned long)r.index, r.avgFrameMs, r.p50FrameMs, r.p95FrameMs,
-            r.avgCPUPercent, r.avgCPUCores, r.footprintDeltaMB];
+            roundCores > 0 ? r.avgCPUPercent / (double)roundCores : 0,
+            r.avgCPUPercent, r.footprintDeltaMB];
     }
 
     return text;

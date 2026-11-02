@@ -134,13 +134,15 @@
     _unitLabel.textColor = [BenchTheme secondaryText];
     _unitLabel.text = @"";
 
-    // 脚注默认隐藏，只有需要解释口径时才显示，避免空行撑高栅格
+    // 脚注默认隐藏，只有需要解释口径时才显示，避免空行撑高栅格。
+    // 字号跟随 captionFont 派生而不是写死 10pt：放大整体字号时这里也要跟着放大，
+    // 否则「口径说明」反而成了整屏最小的字。允许两行，变长后换行而非缩字。
     _footnoteLabel = [[UILabel alloc] init];
-    _footnoteLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightRegular];
+    _footnoteLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
     _footnoteLabel.textColor = [BenchTheme secondaryText];
-    _footnoteLabel.numberOfLines = 1;
+    _footnoteLabel.numberOfLines = 2;
     _footnoteLabel.adjustsFontSizeToFitWidth = YES;
-    _footnoteLabel.minimumScaleFactor = 0.7;
+    _footnoteLabel.minimumScaleFactor = 0.8;
     _footnoteLabel.hidden = YES;
 
     _valueStack = [[UIStackView alloc] initWithArrangedSubviews:@[_valueLabel, _unitLabel]];
@@ -208,7 +210,7 @@
 
     _titleLabel = [[UILabel alloc] init];
     _titleLabel.text = title;
-    _titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    _titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
     _titleLabel.textColor = [BenchTheme primaryText];
     [_titleLabel setContentHuggingPriority:UILayoutPriorityRequired
                                    forAxis:UILayoutConstraintAxisHorizontal];
@@ -298,7 +300,7 @@
                                    forAxis:UILayoutConstraintAxisHorizontal];
 
     _textField = [[UITextField alloc] init];
-    _textField.font = [UIFont monospacedDigitSystemFontOfSize:15 weight:UIFontWeightMedium];
+    _textField.font = [UIFont monospacedDigitSystemFontOfSize:17 weight:UIFontWeightMedium];
     _textField.textColor = [BenchTheme primaryText];
     _textField.backgroundColor = [BenchTheme accentSoft];
     _textField.layer.cornerRadius = 8;
@@ -376,7 +378,7 @@
     _captionLabel.minimumScaleFactor = 0.75;
 
     _textField = [[UITextField alloc] init];
-    _textField.font = [UIFont monospacedDigitSystemFontOfSize:16 weight:UIFontWeightMedium];
+    _textField.font = [UIFont monospacedDigitSystemFontOfSize:17 weight:UIFontWeightMedium];
     _textField.textColor = [BenchTheme primaryText];
     _textField.backgroundColor = [BenchTheme accentSoft];
     _textField.layer.cornerRadius = 8;
@@ -549,8 +551,10 @@
     // 表头与数据行用完全相同的结构，列宽自然一致；
     // 不能跨行引用宽度锚点——表头和数据行分属不同父视图，
     // 没有共同祖先时创建约束会直接抛 NSGenericException。
-    const CGFloat titleWidth = 56.0;
-    const CGFloat spacing = 6.0;
+    // 行名列宽随字号一起放大：14pt 下 "净内存" 需要约 66pt 才不被压缩，
+    // 名称被缩字是最难读的失败模式，宁可多留几个 pt。
+    const CGFloat titleWidth = 68.0;
+    const CGFloat spacing = 8.0;
 
     UIView *cornerSpacer = [[UIView alloc] init];
     [cornerSpacer.widthAnchor constraintEqualToConstant:titleWidth].active = YES;
@@ -588,7 +592,7 @@
         for (NSString *cell in cells) {
             // 数值用等宽字体，不同行的数字才能纵向对齐
             [valueCells addArrangedSubview:[self labelWithText:cell
-                                                          font:[BenchTheme monoFontOfSize:12]
+                                                          font:[BenchTheme monoFontOfSize:14]
                                                          color:[BenchTheme primaryText]]];
         }
         [line addArrangedSubview:valueCells];

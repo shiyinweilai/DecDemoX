@@ -69,25 +69,27 @@
 }
 
 + (UIFont *)titleFont {
-    return [UIFont systemFontOfSize:28 weight:UIFontWeightBold];
+    return [UIFont systemFontOfSize:30 weight:UIFontWeightBold];
 }
 
 + (UIFont *)sectionFont {
-    return [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    return [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
 }
 
 + (UIFont *)metricFont {
     // 等宽数字：数值刷新时字符宽度一致，界面不会左右抖动
-    UIFont *base = [UIFont monospacedDigitSystemFontOfSize:26 weight:UIFontWeightSemibold];
+    UIFont *base = [UIFont monospacedDigitSystemFontOfSize:30 weight:UIFontWeightSemibold];
     return base;
 }
 
 + (UIFont *)bodyFont {
-    return [UIFont systemFontOfSize:15 weight:UIFontWeightRegular];
+    return [UIFont systemFontOfSize:16 weight:UIFontWeightRegular];
 }
 
 + (UIFont *)captionFont {
-    return [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
+    // 说明文字是「读得到才叫说明」的那部分：12pt 在手机上偏小，
+    // 用户需要凑近看才认得出这是口径还是单位。统一提到 14pt。
+    return [UIFont systemFontOfSize:14 weight:UIFontWeightRegular];
 }
 
 + (UIFont *)monoFontOfSize:(CGFloat)size {

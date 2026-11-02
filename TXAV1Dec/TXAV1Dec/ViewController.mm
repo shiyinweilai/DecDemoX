@@ -42,7 +42,7 @@
     _titleLabel.textColor = [BenchTheme secondaryText];
 
     _valueLabel = [[UILabel alloc] init];
-    _valueLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+    _valueLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
     _valueLabel.textColor = [BenchTheme primaryText];
     _valueLabel.numberOfLines = 1;
     _valueLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
@@ -171,9 +171,9 @@
 @property (nonatomic, strong) UILabel *resultStreamLabel;
 @property (nonatomic, strong) BenchMetricTile *fpsTile;
 @property (nonatomic, strong) BenchMetricTile *mspfTile;
-@property (nonatomic, strong) BenchMetricTile *efficiencyTile;
 @property (nonatomic, strong) BenchMetricTile *cpuTile;
 @property (nonatomic, strong) BenchMetricTile *memoryTile;
+@property (nonatomic, strong) BenchMetricTile *jitterTile;
 @property (nonatomic, strong) BenchMetricTile *p95Tile;
 @property (nonatomic, strong) UIStackView *singleResultStack;
 @property (nonatomic, strong) BenchComparisonView *comparisonView;
@@ -325,7 +325,7 @@
 
 - (void)buildDeviceHeader {
     self.deviceNameLabel = [[UILabel alloc] init];
-    self.deviceNameLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    self.deviceNameLabel.font = [UIFont systemFontOfSize:18 weight:UIFontWeightSemibold];
     self.deviceNameLabel.textColor = [BenchTheme primaryText];
     self.deviceNameLabel.adjustsFontSizeToFitWidth = YES;
     self.deviceNameLabel.minimumScaleFactor = 0.8;
@@ -388,7 +388,7 @@
 
     self.decoderField = [[UITextField alloc] init];
     self.decoderField.placeholder = @"如 av1d 1.4.1";
-    self.decoderField.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+    self.decoderField.font = [UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
     self.decoderField.textColor = [BenchTheme primaryText];
     self.decoderField.backgroundColor = [BenchTheme accentSoft];
     self.decoderField.layer.cornerRadius = 8;
@@ -877,34 +877,37 @@
 
     // 当前码流名：批量测试时需要知道下面这组数字属于哪个码流
     self.resultStreamLabel = [[UILabel alloc] init];
-    self.resultStreamLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    self.resultStreamLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
     self.resultStreamLabel.textColor = [BenchTheme primaryText];
     self.resultStreamLabel.numberOfLines = 1;
     self.resultStreamLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
 
-    const CGFloat tileFont = 20.0;
-    // 六个格子按「用户最关心」排序：帧率、单帧耗时、每帧 CPU 成本、
-    // CPU 占用、解码器净内存、P95。前两项判断快不快，后四项判断贵不贵、稳不稳。
+    const CGFloat tileFont = 24.0;
+    // 六个格子按「判读顺序」排：帧率、单帧耗时决定快不快；
+    // CPU 决定贵不贵；波动、P95 决定稳不稳；净内存决定会不会被杀。
+    // 波动原本只是脚注里的一串数字，但「稳不稳」是解码器选型的独立维度，
+    // 快而抖动大的实现同样不能用，所以提到指标位单独占一格。
     self.fpsTile = [[BenchMetricTile alloc] initWithCaption:@"解码帧率" valueFontSize:tileFont];
     self.mspfTile = [[BenchMetricTile alloc] initWithCaption:@"单帧耗时" valueFontSize:tileFont];
-    self.efficiencyTile = [[BenchMetricTile alloc] initWithCaption:@"每帧 CPU 成本" valueFontSize:tileFont];
-    self.cpuTile = [[BenchMetricTile alloc] initWithCaption:@"CPU 占用" valueFontSize:tileFont];
+    self.cpuTile = [[BenchMetricTile alloc] initWithCaption:@"CPU 占用（整机）" valueFontSize:tileFont];
     self.memoryTile = [[BenchMetricTile alloc] initWithCaption:@"解码器净内存" valueFontSize:tileFont];
+    self.jitterTile = [[BenchMetricTile alloc] initWithCaption:@"波动" valueFontSize:tileFont];
     self.p95Tile = [[BenchMetricTile alloc] initWithCaption:@"P95 单帧" valueFontSize:tileFont];
 
-    [self.efficiencyTile setFootnote:@"越低越好"];
     [self.memoryTile setFootnote:@"峰值 - 基线"];
 
-    UIStackView *row1 = [self metricRowWithViews:@[self.fpsTile, self.mspfTile, self.efficiencyTile]];
-    UIStackView *row2 = [self metricRowWithViews:@[self.cpuTile, self.memoryTile, self.p95Tile]];
+    UIStackView *row1 = [self metricRowWithViews:@[self.fpsTile, self.mspfTile, self.cpuTile]];
+    UIStackView *row2 = [self metricRowWithViews:@[self.jitterTile, self.p95Tile, self.memoryTile]];
 
+    // 这两段是口径与上下文，属于「要读得清才敢下结论」的信息，
+    // 之前 12pt / 10pt 是全屏最小的字号，反而最难核对，统一提到 14pt。
     self.stabilityLabel = [[UILabel alloc] init];
     self.stabilityLabel.font = [BenchTheme captionFont];
     self.stabilityLabel.textColor = [BenchTheme secondaryText];
     self.stabilityLabel.numberOfLines = 0;
 
     self.detailLabel = [[UILabel alloc] init];
-    self.detailLabel.font = [BenchTheme monoFontOfSize:10];
+    self.detailLabel.font = [BenchTheme monoFontOfSize:13];
     self.detailLabel.textColor = [BenchTheme secondaryText];
     self.detailLabel.numberOfLines = 0;
 
@@ -966,8 +969,8 @@
 
     if (summary.scoredCount == 0) {
         self.stabilityLabel.text = @"仅有预热轮，未产生有效统计";
-        for (BenchMetricTile *tile in @[self.fpsTile, self.mspfTile, self.efficiencyTile,
-                                        self.cpuTile, self.memoryTile, self.p95Tile]) {
+        for (BenchMetricTile *tile in @[self.fpsTile, self.mspfTile, self.cpuTile,
+                                        self.memoryTile, self.jitterTile, self.p95Tile]) {
             [tile setValue:@"--" unit:nil];
         }
         return;
@@ -983,18 +986,14 @@
     [self.mspfTile setValue:[NSString stringWithFormat:@"%.3f", summary.avgFrameMs]
                        unit:@"ms"];
 
-    // 每帧 CPU 成本：数值极小，用 4 位有效小数才看得出解码器之间的差别
-    [self.efficiencyTile setValue:[NSString stringWithFormat:@"%.4f", summary.cpuSecondsPerFrame]
-                             unit:@"核·秒"];
-
-    // CPU 主值用单核百分比（100% = 占满 1 核），这是 Instruments、Android top
-    // 都用惯的口径，也是「占比」语义下分辨率最高的表述。
-    // 整机占比只放脚注：6 核设备上 0.77 核 = 12.8%，保留一位小数后
-    // 相邻两档解码器的差异会被直接抹平（12.8% vs 12.8%），看不出优化效果。
-    [self.cpuTile setValue:[NSString stringWithFormat:@"%.0f", summary.avgCPUPercent]
+    // CPU 主值用整机占比：这是「这个 App 吃了我多少 CPU」最直觉的答案，
+    // 也是跨机型唯一能直接对比的量（单核口径在 6 核机器上会到 500%，
+    // 和任务管理器的观感对不上）。次要信息只给单核占比本身，
+    // 不再并出「核心数」——0.84 核就是 84% 除以 100，同一件事说两遍是噪音。
+    [self.cpuTile setValue:[NSString stringWithFormat:@"%.1f", summary.cpuSharePercent]
                       unit:@"%"];
-    [self.cpuTile setFootnote:[NSString stringWithFormat:@"%.2f 核 · 整机 %.1f%%",
-                               summary.avgCPUCores, summary.cpuSharePercent]];
+    [self.cpuTile setFootnote:[NSString stringWithFormat:@"%.0f%% 单核口径",
+                               summary.avgCPUPercent]];
 
     // 净内存才是解码器自己的开销，绝对值放脚注
     [self.memoryTile setValue:[NSString stringWithFormat:@"%.1f", summary.footprintDeltaMB]
@@ -1002,17 +1001,24 @@
     [self.memoryTile setFootnote:[NSString stringWithFormat:@"峰值 %.0f MB",
                                   summary.peakFootprintMB]];
 
+    // 波动 = 轮间标准差 / 均值。放在指标位是为了让「稳不稳」和「快不快」
+    // 同等可见：只相差 1% 的两档实现，波动差 5% 才是选型的决定因素。
+    // 用两位小数：稳定实现的波动常在 0.3%~1% 之间，一位小数会把 0.52 和 0.61
+    // 都显示成 0.5/0.6，刚好丢掉需要判断的那点差别。
+    [self.jitterTile setValue:[NSString stringWithFormat:@"%.2f", summary.fluctuationPercent]
+                         unit:@"%"];
+    [self.jitterTile setFootnote:[NSString stringWithFormat:@"±%.3f ms", summary.stddevFrameMs]];
+
     [self.p95Tile setValue:[NSString stringWithFormat:@"%.2f", last.p95FrameMs]
                       unit:@"ms"];
 
-    // 稳定性与口径说明放正文，指标格放不下的信息都在这里
+    // 波动的绝对值已有独立指标格，这里只留轮次范围和极值，不再重复百分比
     self.stabilityLabel.text = [NSString stringWithFormat:
-        @"%lu 轮 · 轮间标准差 %.3f ms (%.1f%%) · 最快 %.3f / 最慢 %.3f ms",
+        @"%lu 轮 · 最快 %.3f / 最慢 %.3f ms · P50 %.3f ms",
         (unsigned long)summary.scoredCount,
-        summary.stddevFrameMs,
-        summary.fluctuationPercent,
         summary.minAvgFrameMs,
-        summary.maxAvgFrameMs];
+        summary.maxAvgFrameMs,
+        last.p50FrameMs];
 
     if (last) {
         self.detailLabel.text = [NSString stringWithFormat:
@@ -1034,32 +1040,37 @@
     NSMutableArray<NSString *> *headers = [NSMutableArray array];
     NSMutableArray<NSString *> *fps = [NSMutableArray array];
     NSMutableArray<NSString *> *mspf = [NSMutableArray array];
-    NSMutableArray<NSString *> *efficiency = [NSMutableArray array];
     NSMutableArray<NSString *> *cpu = [NSMutableArray array];
-    NSMutableArray<NSString *> *memory = [NSMutableArray array];
+    NSMutableArray<NSString *> *jitter = [NSMutableArray array];
     NSMutableArray<NSString *> *p95 = [NSMutableArray array];
+    NSMutableArray<NSString *> *memory = [NSMutableArray array];
 
     for (BenchStreamResult *result in self.batchResults) {
         [headers addObject:result.displayName];
         BenchSummary *s = result.summary;
         if (s.scoredCount == 0) {
-            for (NSMutableArray *column in @[fps, mspf, efficiency, cpu, memory, p95]) {
+            for (NSMutableArray *column in @[fps, mspf, cpu, jitter, p95, memory]) {
                 [column addObject:@"--"];
             }
             continue;
         }
         [fps addObject:[NSString stringWithFormat:@"%.1f", s.decodeFPS]];
         [mspf addObject:[NSString stringWithFormat:@"%.2f", s.avgFrameMs]];
-        [efficiency addObject:[NSString stringWithFormat:@"%.4f", s.cpuSecondsPerFrame]];
-        [cpu addObject:[NSString stringWithFormat:@"%.1f", s.avgCPUPercent]];
-        [memory addObject:[NSString stringWithFormat:@"%.1f", s.footprintDeltaMB]];
+        // 与指标格同口径：CPU 用整机占比，波动用轮间变异系数。
+        // 对比表用两位小数：整机占比的分辨率被核数摊薄了，6 核机上
+        // 一位小数只有 0.6% 单核的精度，两档实现并列时常显示成同一个数。
+        [cpu addObject:[NSString stringWithFormat:@"%.2f", s.cpuSharePercent]];
+        [jitter addObject:[NSString stringWithFormat:@"%.2f", s.fluctuationPercent]];
         [p95 addObject:[NSString stringWithFormat:@"%.2f",
                         result.rounds.lastObject.p95FrameMs]];
+        [memory addObject:[NSString stringWithFormat:@"%.1f", s.footprintDeltaMB]];
     }
 
+    // 列按判读顺序：快不快 → 稳不稳 → 贵不贵
     [self.comparisonView reloadWithHeaders:headers
-                                 rowTitles:@[@"fps", @"ms/f", @"核·秒/帧", @"CPU%", @"净内存", @"P95"]
-                                    values:@[fps, mspf, efficiency, cpu, memory, p95]];}
+                                 rowTitles:@[@"fps", @"ms/f", @"CPU%", @"波动%", @"P95", @"净内存"]
+                                    values:@[fps, mspf, cpu, jitter, p95, memory]];
+}
 
 /// 批量测试的报告文本：每个码流一段，末尾附对比表
 - (NSString *)buildBatchReportText {
@@ -1111,10 +1122,10 @@
         appendPadded(@"码流", 22);
         appendPadded(@"fps", 9);
         appendPadded(@"ms/f", 9);
-        appendPadded(@"核·秒/帧", 12);
-        appendPadded(@"CPU%", 8);
+        appendPadded(@"CPU%", 9);
+        appendPadded(@"波动%", 9);
+        appendPadded(@"P95ms", 9);
         appendPadded(@"净内存MB", 11);
-        appendPadded(@"P95ms", 8);
         [text appendString:@"\n"];
 
         for (BenchStreamResult *result in self.batchResults) {
@@ -1123,15 +1134,15 @@
             appendPadded(result.displayName, 22);
             appendPadded([NSString stringWithFormat:@"%.2f", s.decodeFPS], 9);
             appendPadded([NSString stringWithFormat:@"%.3f", s.avgFrameMs], 9);
-            appendPadded([NSString stringWithFormat:@"%.5f", s.cpuSecondsPerFrame], 12);
-            appendPadded([NSString stringWithFormat:@"%.1f", s.avgCPUPercent], 8);
-            appendPadded([NSString stringWithFormat:@"%.1f", s.footprintDeltaMB], 11);
+            appendPadded([NSString stringWithFormat:@"%.2f", s.cpuSharePercent], 9);
+            appendPadded([NSString stringWithFormat:@"%.2f", s.fluctuationPercent], 9);
             appendPadded([NSString stringWithFormat:@"%.2f",
-                          result.rounds.lastObject.p95FrameMs], 8);
+                          result.rounds.lastObject.p95FrameMs], 9);
+            appendPadded([NSString stringWithFormat:@"%.1f", s.footprintDeltaMB], 11);
             [text appendString:@"\n"];
         }
 
-        [text appendString:@"\n（核·秒/帧 = 每帧消耗的核心·秒数，越低越高效，可直接跨码流比较）\n"];
+        [text appendString:@"\n（CPU% 为整机占比；波动% = 轮间标准差/均值，越低越稳定）\n"];
 
         [text appendString:@"\n---------- 逐码流明细 ----------\n"];
         for (BenchStreamResult *result in self.batchResults) {
@@ -1142,9 +1153,10 @@
                 result.rounds.lastObject.p95FrameMs,
                 s.decodeFPS,
                 result.rounds.lastObject.resolutionDescription];
-            [text appendFormat:@"CPU %.1f%% 单核口径 = %.2f 核 = 整机 %.1f%%\n",
-                s.avgCPUPercent, s.avgCPUCores, s.cpuSharePercent];
-            [text appendFormat:@"每帧 CPU 成本 %.5f 核·秒\n", s.cpuSecondsPerFrame];
+            [text appendFormat:@"CPU 整机 %.1f%% = %.0f%% 单核口径 = %.2f 核\n",
+                s.cpuSharePercent, s.avgCPUPercent, s.avgCPUCores];
+            [text appendFormat:@"波动 %.2f%%（轮间标准差 %.4f ms）\n",
+                s.fluctuationPercent, s.stddevFrameMs];
             [text appendFormat:@"净内存 %.1f MB（峰值 %.1f MB，resident 峰 %.1f MB）\n",
                 s.footprintDeltaMB, s.peakFootprintMB, s.peakResidentMB];
         }
