@@ -474,6 +474,7 @@ NSString *BenchDecoderVersionDescription(void) {
     const NSUInteger limitFrames = config.limitFrames;
     const NSUInteger skipFrames = config.skipFrames;
     const NSUInteger threads = config.threads;
+    const BOOL playerCoreThreading = config.playerCoreThreading;
     const BenchSchedulePolicy schedulePolicy = config.schedulePolicy;
     const BOOL pacingEnabled = config.pacingEnabled;
     const BOOL pacingUseSourceFPS = config.pacingUseSourceFPS;
@@ -550,6 +551,7 @@ NSString *BenchDecoderVersionDescription(void) {
                                                                 limit:limitFrames
                                                                  skip:skipFrames
                                                               threads:threads
+                                                  playerCoreThreading:playerCoreThreading
                                                        schedulePolicy:schedulePolicy
                                                                pacing:pacingEnabled
                                                     pacingUseSourceFPS:pacingUseSourceFPS
@@ -595,6 +597,7 @@ NSString *BenchDecoderVersionDescription(void) {
                                   limit:config.limitFrames
                                    skip:config.skipFrames
                                 threads:config.threads
+                    playerCoreThreading:config.playerCoreThreading
                          schedulePolicy:config.schedulePolicy
                                  pacing:config.pacingEnabled
                       pacingUseSourceFPS:config.pacingUseSourceFPS
@@ -612,6 +615,7 @@ NSString *BenchDecoderVersionDescription(void) {
                                         limit:(NSUInteger)limitFrames
                                          skip:(NSUInteger)skipFrames
                                       threads:(NSInteger)threads
+                          playerCoreThreading:(BOOL)playerCoreThreading
                                schedulePolicy:(BenchSchedulePolicy)schedulePolicy
                                        pacing:(BOOL)pacingEnabled
                             pacingUseSourceFPS:(BOOL)pacingUseSourceFPS
@@ -623,6 +627,8 @@ NSString *BenchDecoderVersionDescription(void) {
     cfg.limit = (unsigned)limitFrames;
     cfg.skip = (unsigned)skipFrames;
     cfg.threads = (int)threads;
+    cfg.thread_policy = playerCoreThreading ? TXAV1D_BENCH_THREAD_POLICY_PLAYERCORE
+                                            : TXAV1D_BENCH_THREAD_POLICY_CAPABILITY;
     cfg.apply_grain = -1;   // 未显式指定时交由库默认
     cfg.wpp = -1;
     // 定速是「解码循环节流」，不是解码器参数，所以它走 bench 配置而不是
@@ -747,6 +753,14 @@ NSString *BenchDecoderVersionDescription(void) {
         && (result.pacing_fps > 0);
     metrics.pacingFPS = result.pacing_fps;
     metrics.pacingWaitMs = result.pacing_wait_ms;
+    metrics.bufferCapacity = result.buffer_capacity;
+    metrics.bufferFullEvents = result.buffer_full_events;
+    metrics.bufferStarveEvents = result.buffer_starve_events;
+    metrics.appliedPlayerCoreThreading =
+        (result.applied_thread_policy == TXAV1D_BENCH_THREAD_POLICY_PLAYERCORE);
+    metrics.appliedNThreads = result.applied_n_threads;
+    metrics.appliedThreadOverride = result.applied_thread_override;
+    metrics.appliedFrameDelay = result.applied_frame_delay;
 
     // 平均值改用整轮同步差分：它覆盖解码全程、与轮次长短无关。
     // 区间无效（时钟跳变等）时退回定时器均值；两者都没有就标记为「无采样」。

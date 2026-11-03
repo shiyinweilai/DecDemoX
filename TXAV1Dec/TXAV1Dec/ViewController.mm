@@ -187,6 +187,7 @@
 @property (nonatomic, strong) BenchCompactField *warmupField;
 @property (nonatomic, strong) BenchCompactField *skipField;
 @property (nonatomic, strong) BenchSegmentRow *threadSegment;
+@property (nonatomic, strong) BenchSegmentRow *threadPolicySegment;
 @property (nonatomic, strong) BenchSegmentRow *affinitySegment;
 
 /**
@@ -531,6 +532,11 @@
     self.threadSegment = [[BenchSegmentRow alloc] initWithTitle:@"解码线程"
                                                           items:@[@"自动", @"1", @"2", @"4", @"8"]];
 
+    // 线程口径：解码器能力 = 填几个线程就真跑几个（txav1d 写 reserved[0]）；
+    // 对齐 PlayerCore = 复刻线上 FFmpeg 封装的线程下发方式，数据代表线上表现。
+    self.threadPolicySegment = [[BenchSegmentRow alloc] initWithTitle:@"线程口径"
+                                                                items:@[@"解码器能力", @"对齐 PlayerCore"]];
+
     // 核调度只保留三项：L2 亲和按 task 分组，全 App 只有一个 tag 时等于没有约束，
     // 实测无差异，留着只会让人以为它有用。
     self.affinitySegment = [[BenchSegmentRow alloc] initWithTitle:@"核调度偏好"
@@ -563,8 +569,8 @@
     [self.pacingField.widthAnchor constraintEqualToConstant:120].active = YES;
 
     UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[
-        targetBlock, numbersRow, self.threadSegment, self.affinitySegment,
-        self.pacingSegment, pacingRow
+        targetBlock, numbersRow, self.threadSegment, self.threadPolicySegment,
+        self.affinitySegment, self.pacingSegment, pacingRow
     ]];
     stack.axis = UILayoutConstraintAxisVertical;
     stack.spacing = 12;
@@ -590,6 +596,7 @@
     self.warmupField.textField.text = [NSString stringWithFormat:@"%lu",
                                        (unsigned long)defaults.warmupRounds];
     self.skipField.textField.text = @"0";
+    self.threadPolicySegment.segmentedControl.selectedSegmentIndex = 0;
     // 定速默认关闭：测速目标是找性能上限，默认限帧会让各版本都收敛到目标帧率。
     // 自定义帧率的输入框给个常见值，切换到「指定帧率」时不用先想填什么。
     self.pacingSegment.segmentedControl.selectedSegmentIndex = 0;
@@ -1095,6 +1102,8 @@
         config.threads = [self threadCountFromSegment];
     }
     config.schedulePolicy = [self schedulePolicyFromSegment];
+    config.playerCoreThreading =
+        self.threadPolicySegment.segmentedControl.selectedSegmentIndex == 1;
     // 定速设置：分段控件第 0 项是「不定速」，1 是「按码流帧率」，
     // 2 是「自定义帧率」。自定义模式下输入框留空或非正数视为关闭，
     // 否则会传一个 0 fps 给库，那等于每帧都等无限久。
@@ -1267,6 +1276,7 @@
         field.textField.enabled = !running;
     }
     self.threadSegment.segmentedControl.enabled = !running;
+    self.threadPolicySegment.segmentedControl.enabled = !running;
     self.affinitySegment.segmentedControl.enabled = !running;
     self.pacingSegment.segmentedControl.enabled = !running;
     // 帧率框还受「指定帧率」档位约束，交给同一个方法统一判断，
@@ -1658,6 +1668,12 @@ static id BenchJSONString(NSString *value) {
     // 线程数同时给数值与语义：0 在库层是「自动取满」，单看数字会以为是没设
     config[@"threads"] = BenchJSONInteger((NSUInteger)MAX(cfg.threads, 0));
     config[@"threads_mode"] = cfg.threads > 0 ? @"manual" : @"auto";
+    config[@"thread_policy"] = cfg.playerCoreThreading ? @"playercore" : @"capability";
+    config[@"thread_policy_note"] = cfg.playerCoreThreading
+        ? (cfg.threads > 0
+            ? @"对齐 PlayerCore（手动线程）：复刻封装公式，txav1d 写 reserved[0]，两个解码器线程数一致生效"
+            : @"对齐 PlayerCore（自动）：复刻 FFmpeg libtxav1d/libdav1d 封装，txav1d 不写 reserved[0]，按线上截断，取 CPU 核数")
+        : @"解码器能力：txav1d 写 reserved[0]，填几个线程就真跑几个，用于线程扩展性对比";
     config[@"schedule_policy"] = BenchJSONString(
         [BenchSystemMetrics schedulePolicyName:cfg.schedulePolicy]);
     config[@"schedule_policy_note"] = BenchJSONString(
@@ -1747,6 +1763,19 @@ static id BenchJSONString(NSString *value) {
             }
         }
         summary[@"pacing_applied"] = @(pacingApplied);
+        BenchRoundMetrics *lastScored = s.scoredRounds.lastObject;
+        if (lastScored) {
+            summary[@"applied_thread_policy"] = lastScored.appliedPlayerCoreThreading
+                ? @"playercore" : @"capability";
+            summary[@"applied_n_threads"] =
+                BenchJSONInteger((NSUInteger)MAX(lastScored.appliedNThreads, 0));
+            summary[@"applied_thread_override"] =
+                BenchJSONInteger((NSUInteger)MAX(lastScored.appliedThreadOverride, 0));
+            summary[@"applied_frame_delay"] =
+                BenchJSONInteger((NSUInteger)MAX(lastScored.appliedFrameDelay, 0));
+            summary[@"peak_thread_count"] =
+                BenchJSONInteger((NSUInteger)MAX(lastScored.peakThreadCount, 0));
+        }
         summary[@"pacing_target_fps"] = pacingApplied
             ? BenchJSONNumber(pacingFPS, 3) : [NSNull null];
         summary[@"pacing_wait_ms_total"] = pacingApplied
@@ -1821,9 +1850,25 @@ static id BenchJSONString(NSString *value) {
                     ? BenchJSONNumber(r.pacingFPS, 3) : [NSNull null];
                 round[@"pacing_wait_ms"] = r.pacingApplied
                     ? BenchJSONNumber(r.pacingWaitMs, 3) : [NSNull null];
+                // 定速缓冲观测：starve>0 说明解码跟不上目标帧率（会卡顿），
+                // full 大说明解码产能远超目标帧率。非定速时无意义，输出 null。
+                round[@"buffer_capacity"] = r.pacingApplied
+                    ? BenchJSONInteger((NSUInteger)MAX(r.bufferCapacity, 0)) : [NSNull null];
+                round[@"buffer_full_events"] = r.pacingApplied
+                    ? BenchJSONInteger(r.bufferFullEvents) : [NSNull null];
+                round[@"buffer_starve_events"] = r.pacingApplied
+                    ? BenchJSONInteger(r.bufferStarveEvents) : [NSNull null];
                 round[@"fps_actual"] = BenchJSONNumber(r.actualFPS, 3);
                 round[@"peak_thread_count"] =
                     BenchJSONInteger((NSUInteger)MAX(r.peakThreadCount, 0));
+                round[@"applied_thread_policy"] = r.appliedPlayerCoreThreading
+                    ? @"playercore" : @"capability";
+                round[@"applied_n_threads"] =
+                    BenchJSONInteger((NSUInteger)MAX(r.appliedNThreads, 0));
+                round[@"applied_thread_override"] =
+                    BenchJSONInteger((NSUInteger)MAX(r.appliedThreadOverride, 0));
+                round[@"applied_frame_delay"] =
+                    BenchJSONInteger((NSUInteger)MAX(r.appliedFrameDelay, 0));
                 // 区间墙钟与 CPU 时长仅用于诊断：二者之比即 cpu_percent，
                 // 与 decode_ms 相差很大时说明区间里混进了非解码开销。
                 round[@"cpu_interval_wall_ms"] = BenchJSONNumber(r.cpuIntervalWallMs, 3);
@@ -2069,6 +2114,7 @@ static id BenchJSONString(NSString *value) {
     NSUInteger pacingIndex = [args indexOfObject:@"--pacing"];
     NSUInteger pacingFPSIndex = [args indexOfObject:@"--pacing-fps"];
     NSUInteger policyIndex = [args indexOfObject:@"--policy"];
+    NSUInteger threadPolicyIndex = [args indexOfObject:@"--thread-policy"];
     NSUInteger roundsIndex = [args indexOfObject:@"--rounds"];
 
     [self.batchResults removeAllObjects];
@@ -2126,9 +2172,20 @@ static id BenchJSONString(NSString *value) {
     if (pacingFPSIndex != NSNotFound && pacingFPSIndex + 1 < args.count) {
         self.pacingField.textField.text = args[pacingFPSIndex + 1];
     }
+    // 线程口径：--thread-policy 0 解码器能力 / 1 对齐 PlayerCore，走界面控件。
+    self.threadPolicySegment.segmentedControl.selectedSegmentIndex = 0;
+    if (threadPolicyIndex != NSNotFound && threadPolicyIndex + 1 < args.count) {
+        NSInteger threadPolicy = [args[threadPolicyIndex + 1] integerValue];
+        if (threadPolicy == 0 || threadPolicy == 1) {
+            self.threadPolicySegment.segmentedControl.selectedSegmentIndex = threadPolicy;
+        }
+    }
     [self refreshPacingFieldAvailabilityWithRunning:NO];
 
     append(@"调度策略：%@", [BenchSystemMetrics schedulePolicyName:[self schedulePolicyFromSegment]]);
+    append(@"线程口径：%@",
+           self.threadPolicySegment.segmentedControl.selectedSegmentIndex == 1
+               ? @"对齐 PlayerCore" : @"解码器能力");
     // 0 是「自动」而不是「指定 0 个线程」：配置层把 0 解释为让库按核心数取满。
     // 这里按最终生效值报告，并区分来源是命令行还是界面，避免日志与实际传参不符。
     const NSInteger effectiveThreads = self.threadsOverride >= 0

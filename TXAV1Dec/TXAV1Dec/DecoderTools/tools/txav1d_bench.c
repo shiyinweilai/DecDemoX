@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <pthread.h>
 #ifdef __APPLE__
 #include <mach/mach_time.h>
 #include <sys/types.h>
@@ -96,10 +97,183 @@ static int bench_logical_cpu_count(void) {
 #endif
 }
 
+/**
+ * 复刻 FFmpeg libtxav1d 封装（libtxav1d_init）的 max_frame_delay 推导：
+ *     threads_scaled = thread_count * 3 / 2
+ *     tile_threads   = floor(sqrt(threads_scaled))
+ *     frame_delay    = ceil(threads_scaled / tile_threads)
+ * 用整数运算实现 floor(sqrt) 与 ceil(div)，对正整数精确且无需 math.h。
+ */
+static int __attribute__((unused)) bench_playercore_frame_delay(int thread_count) {
+    int threads_scaled = thread_count * 3 / 2;
+    if (threads_scaled < 1) threads_scaled = 1;
+    int tile_threads = 1;
+    while ((tile_threads + 1) * (tile_threads + 1) <= threads_scaled) {
+        tile_threads++;
+    }
+    int frame_delay = (threads_scaled + tile_threads - 1) / tile_threads;
+    if (frame_delay < 1) frame_delay = 1;
+#ifdef TXAV1D_MAX_FRAME_DELAY
+    if (frame_delay > TXAV1D_MAX_FRAME_DELAY) frame_delay = TXAV1D_MAX_FRAME_DELAY;
+#endif
+    return frame_delay;
+}
+
 static void set_error(Txav1dBenchResult *const r, const char *const msg) {
     if (!r) return;
     r->status = TXAV1D_BENCH_ERROR;
     snprintf(r->error, sizeof(r->error), "%s", msg ? msg : "unknown error");
+}
+
+/* ============================================================
+ * 定速（真实播放模型）：解码线程 + 出帧线程 + 环形缓冲
+ *
+ * 解码线程全速把帧推入缓冲（满则阻塞 = 背压），出帧线程按目标帧率
+ * 的绝对时刻取帧（空则等待）。这与真实播放器的解码/渲染分离一致，
+ * 不在解码路径上插入任何 sleep，因此解码能力指标（decode_ms、
+ * frame_ms）不受定速影响；实时节拍由出帧线程独立承担。
+ * ============================================================ */
+
+/** 环形缓冲中的一帧。pic 的所有权随之转移给出帧线程负责 unref/write。 */
+typedef struct PacedSlot {
+    Txav1dPicture pic;
+} PacedSlot;
+
+typedef struct PacedRing {
+    PacedSlot *slots;
+    int capacity;             ///< 槽位数（run-ahead 深度 + 1，留一空位区分满/空）
+    int head;                 ///< 出帧线程下一个读取位
+    int tail;                 ///< 解码线程下一个写入位
+    int count;                ///< 当前缓冲中的帧数
+
+    int producer_done;        ///< 解码线程已结束（正常或出错）
+    int producer_abort;       ///< 解码失败，出帧线程应立即丢弃剩余帧并退出
+    int consumer_error;       ///< 出帧线程写出失败，通知解码线程尽快停止
+
+    pthread_mutex_t lock;
+    pthread_cond_t not_full;  ///< 缓冲从满变为不满
+    pthread_cond_t not_empty; ///< 缓冲从空变为非空
+
+    /* 以下由出帧线程维护并最终回填到 result */
+    MuxerContext *out;        ///< 输出模块（首帧在出帧线程内初始化）
+    const unsigned *fps;      ///< 传给 output_open 的码流帧率
+    uint64_t nspf;            ///< 目标帧间隔（纳秒）
+    uint64_t t_start;         ///< 出帧计时起点（第一帧取出时刻）
+    int started;              ///< 是否已取出第一帧并设定 t_start
+
+    unsigned written;         ///< 已写出帧数
+    uint64_t wait_nanos;      ///< 累计按帧率对齐的等待时长
+    unsigned starve_events;   ///< 到点却取不到帧（解码跟不上）的次数
+    char err_msg[160];        ///< 出帧线程的错误信息
+} PacedRing;
+
+/**
+ * 出帧线程：按目标帧率的绝对时刻从缓冲取帧并写出。
+ *
+ * 节拍基准是「第 n 帧的绝对应产出时刻」= t_start + nspf * n，而非逐帧
+ * 固定 sleep，避免偏差累加成漂移。取不到帧时：若解码已结束则退出，
+ * 否则记一次 starve（解码跟不上），阻塞等待新帧。
+ */
+static void *paced_consumer(void *arg) {
+    PacedRing *ring = (PacedRing *)arg;
+
+    for (;;) {
+        pthread_mutex_lock(&ring->lock);
+        if (ring->count == 0 && !ring->producer_done) {
+            // 到这里要取下一帧却没有帧可取，且解码还没结束——这正是
+            // 「解码跟不上目标帧率」的饥饿信号。只在首帧之后计数：首帧前的
+            // 等待属于解码器冷启动，不算实时性不达标。
+            if (ring->started) ring->starve_events++;
+            while (ring->count == 0 && !ring->producer_done) {
+                pthread_cond_wait(&ring->not_empty, &ring->lock);
+            }
+        }
+        if (ring->count == 0 && ring->producer_done) {
+            pthread_mutex_unlock(&ring->lock);
+            break;   // 缓冲排空且解码结束，正常收尾
+        }
+        if (ring->producer_abort) {
+            // 解码失败：丢弃缓冲里所有剩余帧，立即退出，不再按帧率等待
+            while (ring->count > 0) {
+                Txav1dPicture drop = ring->slots[ring->head].pic;
+                ring->head = (ring->head + 1) % ring->capacity;
+                ring->count--;
+                pthread_mutex_unlock(&ring->lock);
+                txav1d_picture_unref(&drop);
+                pthread_mutex_lock(&ring->lock);
+            }
+            pthread_mutex_unlock(&ring->lock);
+            break;
+        }
+        // 取出一帧（所有权转移到本线程）
+        Txav1dPicture pic = ring->slots[ring->head].pic;
+        ring->head = (ring->head + 1) % ring->capacity;
+        ring->count--;
+        pthread_cond_signal(&ring->not_full);
+        pthread_mutex_unlock(&ring->lock);
+
+        // 首帧：此刻才知道分辨率，初始化输出模块并设定节拍起点
+        if (!ring->started) {
+            if (output_open(&ring->out, "null", "/dev/null", &pic.p, ring->fps) < 0) {
+                txav1d_picture_unref(&pic);
+                pthread_mutex_lock(&ring->lock);
+                ring->consumer_error = 1;
+                snprintf(ring->err_msg, sizeof(ring->err_msg), "初始化输出模块失败");
+                pthread_cond_signal(&ring->not_full);
+                pthread_mutex_unlock(&ring->lock);
+                return NULL;
+            }
+            ring->started = 1;
+            ring->t_start = bench_now_nanos();
+        } else {
+            // 等到「第 written 帧的绝对应产出时刻」。第 0 帧立即出（定义 t_start）。
+            const uint64_t deadline = ring->nspf * (uint64_t)ring->written;
+            const uint64_t elapsed = bench_now_nanos() - ring->t_start;
+            if (elapsed < deadline) {
+                const uint64_t waitStart = bench_now_nanos();
+                bench_sleep_nanos(deadline - elapsed);
+                ring->wait_nanos += bench_now_nanos() - waitStart;
+            }
+        }
+
+        // null muxer 的 write_picture 内部会 unref，这里不能再 unref
+        if (output_write(ring->out, &pic) < 0) {
+            pthread_mutex_lock(&ring->lock);
+            ring->consumer_error = 1;
+            snprintf(ring->err_msg, sizeof(ring->err_msg), "输出帧失败");
+            pthread_cond_signal(&ring->not_full);
+            pthread_mutex_unlock(&ring->lock);
+            return NULL;
+        }
+        ring->written++;
+    }
+    return NULL;
+}
+
+/** 解码线程把一帧交给缓冲；满则阻塞等待。返回 0 成功，-1 表示出帧线程已出错。
+ *  out_block_nanos 回填本次因缓冲满而阻塞的时长，供调用方从单帧间隔中扣除。 */
+static int paced_push(PacedRing *ring, const Txav1dPicture *pic,
+                      unsigned *out_full_events, uint64_t *out_block_nanos) {
+    *out_block_nanos = 0;
+    pthread_mutex_lock(&ring->lock);
+    if (ring->count == ring->capacity - 1 && !ring->consumer_error) {
+        (*out_full_events)++;
+        const uint64_t blockStart = bench_now_nanos();
+        while (ring->count == ring->capacity - 1 && !ring->consumer_error) {
+            pthread_cond_wait(&ring->not_full, &ring->lock);
+        }
+        *out_block_nanos = bench_now_nanos() - blockStart;
+    }
+    if (ring->consumer_error) {
+        pthread_mutex_unlock(&ring->lock);
+        return -1;
+    }
+    ring->slots[ring->tail].pic = *pic;
+    ring->tail = (ring->tail + 1) % ring->capacity;
+    ring->count++;
+    pthread_cond_signal(&ring->not_empty);
+    pthread_mutex_unlock(&ring->lock);
+    return 0;
 }
 
 /** 升序比较，供 qsort 计算分位数 */
@@ -196,12 +370,33 @@ int txav1d_bench(const Txav1dBenchConfig *const cfg,
     txav1d_default_settings(&settings);
     settings.strict_std_compliance = 1;
 #ifndef TXAV1D_SHIM_DAV1D
-    // 「自动」必须显式填满核数，不能只靠库默认值：
-    // txav1d_default_settings 里 s->n_threads = 1，而 dav1d 是 0（按逻辑核自动取满）。
-    // 两边都留 0 让库自己决定时，同一个「自动」档在 txav1d 上实际是纯单线程，
-    // 会得出「txav1d 比 dav1d 慢 2.4 倍」这种线程数不对齐的结论。
-    // 这里统一在自动档按本机逻辑核数填写，并同样走 reserved[0] 绕过 2 线程上限。
-    if (cfg->threads > 0) {
+    if (cfg->thread_policy == TXAV1D_BENCH_THREAD_POLICY_PLAYERCORE) {
+        // 对齐 PlayerCore：逐行复刻 FFmpeg libtxav1d 封装的 libtxav1d_init。
+        //   thread_count：PlayerCore 的 GetDecodeThreadCount()，配置了
+        //       decode_thread_count 就用它，否则取 CPU 核数。
+        //   n_threads = FFMIN(thread_count, TXAV1D_MAX_THREADS)
+        //   max_frame_delay = ceil(threads_scaled / floor(sqrt(threads_scaled)))
+        // 自动档：与线上封装完全一致，不写 reserved[0]，库内部对 n_threads
+        // 的 2 线程截断照常生效——这是线上 PlayerCore 的真实行为，用于测
+        // 「定速下谁更省」。
+        // 手动档：用户明确指定线程数，要求 txav1d 与 dav1d 边界一致，
+        // 所以额外写 reserved[0]，让 txav1d 填几个就真跑几个（dav1d 本来
+        // 就不截断）。frame_delay 仍走封装公式，其余与线上一致。
+        int threadCount = cfg->threads > 0 ? cfg->threads : bench_logical_cpu_count();
+        if (threadCount < 1) threadCount = 1;
+        settings.n_threads = threadCount > TXAV1D_MAX_THREADS ? TXAV1D_MAX_THREADS : threadCount;
+        if (cfg->threads > 0) {
+            settings.reserved[0] = (uint8_t)(settings.n_threads > 255 ? 255 : settings.n_threads);
+        }
+        if (cfg->frame_delay <= 0) {
+            settings.max_frame_delay = bench_playercore_frame_delay(threadCount);
+        }
+    } else if (cfg->threads > 0) {
+        // 解码器能力口径：「自动」必须显式填满核数，不能只靠库默认值：
+        // txav1d_default_settings 里 s->n_threads = 1，而 dav1d 是 0（按逻辑核自动取满）。
+        // 两边都留 0 让库自己决定时，同一个「自动」档在 txav1d 上实际是纯单线程，
+        // 会得出「txav1d 比 dav1d 慢 2.4 倍」这种线程数不对齐的结论。
+        // 这里统一在自动档按本机逻辑核数填写，并同样走 reserved[0] 绕过 2 线程上限。
         settings.n_threads = cfg->threads;
         // txav1d 的 get_num_threads() 对 n_threads 设了硬上限：
         //     threads = imin(s->n_threads, max_threads_used /* = 2 */)
@@ -217,6 +412,10 @@ int txav1d_bench(const Txav1dBenchConfig *const cfg,
         // reserved[0] 负责真正突破限制。reserved[0] 是 uint8_t，
         // 超过 255 会被截断，先夹紧再写。
         settings.reserved[0] = (uint8_t)(cfg->threads > 255 ? 255 : cfg->threads);
+        // frame delay 按 libtxav1d 封装公式推导，与线上帧级并行深度一致。
+        if (cfg->frame_delay <= 0) {
+            settings.max_frame_delay = bench_playercore_frame_delay(cfg->threads);
+        }
     } else {
         // 自动档：取逻辑核数上限，与 dav1d 的 n_threads=0 语义对齐。
         // 这里不调用 txav1d_num_logical_processors()：它在静态库里存在，
@@ -228,13 +427,32 @@ int txav1d_bench(const Txav1dBenchConfig *const cfg,
         if (autoThreads > 255) autoThreads = 255;
         settings.n_threads = autoThreads;
         settings.reserved[0] = (uint8_t)autoThreads;
+        if (cfg->frame_delay <= 0) {
+            settings.max_frame_delay = bench_playercore_frame_delay(autoThreads);
+        }
     }
+    result->applied_thread_override = settings.reserved[0];
 #else
-    if (cfg->threads > 0) settings.n_threads = cfg->threads;
+    if (cfg->thread_policy == TXAV1D_BENCH_THREAD_POLICY_PLAYERCORE) {
+        // 对齐 PlayerCore 的 FFmpeg libdav1d 封装：thread_count 同样取
+        // 配置值或 CPU 核数，n_threads = thread_count，max_frame_delay 不设
+        // （交给库按 n_threads 自动推导）。
+        int threadCount = cfg->threads > 0 ? cfg->threads : bench_logical_cpu_count();
+        if (threadCount < 1) threadCount = 1;
+        settings.n_threads = threadCount;
+    } else if (cfg->threads > 0) {
+        settings.n_threads = cfg->threads;
+    }
+    result->applied_thread_override = 0;
 #endif
     if (cfg->frame_delay > 0) settings.max_frame_delay = cfg->frame_delay;
     if (cfg->apply_grain >= 0) settings.apply_grain = cfg->apply_grain;
     if (cfg->wpp >= 0) settings.use_wpp = cfg->wpp;
+    result->applied_thread_policy = cfg->thread_policy == TXAV1D_BENCH_THREAD_POLICY_PLAYERCORE
+        ? TXAV1D_BENCH_THREAD_POLICY_PLAYERCORE
+        : TXAV1D_BENCH_THREAD_POLICY_CAPABILITY;
+    result->applied_n_threads = settings.n_threads;
+    result->applied_frame_delay = settings.max_frame_delay;
 
     if (txav1d_open(&c, &settings) < 0) {
         input_close(in);
@@ -291,12 +509,55 @@ int txav1d_bench(const Txav1dBenchConfig *const cfg,
     int openedOutput = 0;
     const uint64_t tStart = bench_now_nanos();
 
+    // ---- 定速：建立环形缓冲并启动出帧线程 ----
+    // 定速时解码线程只负责全速解帧并推入缓冲，由出帧线程按帧率写出。
+    // run-ahead 深度默认取 16（经验值：足够铺开 av1d 的帧级并行，又不至于
+    // 让缓冲把「解码跟不上」的信号吸收掉）；调用方可通过 pacing_buffer 覆盖。
+    PacedRing ring;
+    pthread_t consumerThread;
+    int consumerStarted = 0;
+    unsigned bufferFullEvents = 0;
+    int ringCapacity = 0;
+    if (pacingNspf != 0) {
+        int runAhead = cfg->pacing_buffer > 0 ? cfg->pacing_buffer : 16;
+        if (runAhead < 1) runAhead = 1;
+        ringCapacity = runAhead + 1;   // 多一个空位以区分满/空
+        memset(&ring, 0, sizeof(ring));
+        ring.slots = (PacedSlot *)calloc((size_t)ringCapacity, sizeof(PacedSlot));
+        if (!ring.slots) {
+            free(frameMs);
+            txav1d_close(&c);
+            input_close(in);
+            set_error(result, "内存不足，无法分配定速缓冲");
+            return TXAV1D_BENCH_ERROR;
+        }
+        ring.capacity = ringCapacity;
+        ring.fps = fps;
+        ring.nspf = pacingNspf;
+        pthread_mutex_init(&ring.lock, NULL);
+        pthread_cond_init(&ring.not_full, NULL);
+        pthread_cond_init(&ring.not_empty, NULL);
+        if (pthread_create(&consumerThread, NULL, paced_consumer, &ring) != 0) {
+            free(ring.slots);
+            pthread_mutex_destroy(&ring.lock);
+            pthread_cond_destroy(&ring.not_full);
+            pthread_cond_destroy(&ring.not_empty);
+            free(frameMs);
+            txav1d_close(&c);
+            input_close(in);
+            set_error(result, "无法创建出帧线程");
+            return TXAV1D_BENCH_ERROR;
+        }
+        consumerStarted = 1;
+    }
+
     // 单帧耗时按「相邻两次产出帧之间的时间间隔」统计。
     // 原因：av1d 的实际解码工作几乎都发生在 txav1d_send_data 内部，
     // txav1d_get_picture 多数时候只是从输出队列取走一帧，耗时接近 0。
     // 如果只测 get_picture，得到的会是 0.0000 ms/f 这种无效数字。
     uint64_t lastFrameNanos = tStart;
     uint64_t demuxSinceLastFrame = 0;
+    uint64_t pacingBlockSinceLastFrame = 0;   // 定速下累计缓冲满阻塞时长，供下一帧扣除
     int haveFirstFrame = 0;
     // 连续多次既没读出新包、也没产出帧时，说明解码器已无法推进，
     // 必须主动退出，否则会退化成死循环把 App 拖死。
@@ -352,19 +613,24 @@ int txav1d_bench(const Txav1dBenchConfig *const cfg,
         } else {
             idleIterations = 0;
             // 这一帧的耗时 = 距上一帧产出（或测试开始）的墙钟间隔 - 其中读包的耗时。
+            // 定速下还要扣除上一帧因缓冲满而阻塞（背压）的时长：那是等出帧线程
+            // 腾位置的空转，属于节拍开销，不是解码耗时，混进去会让 frame_ms 虚高。
             // 首帧包含解码器内部初始化的成本，单独用 first_frame_ms 记录。
             uint64_t frameNanos = nowNanos - lastFrameNanos;
-            if (demuxSinceLastFrame < frameNanos) {
-                frameNanos -= demuxSinceLastFrame;
+            uint64_t overhead = demuxSinceLastFrame + pacingBlockSinceLastFrame;
+            if (overhead < frameNanos) {
+                frameNanos -= overhead;
             }
             lastFrameNanos = nowNanos;
             demuxSinceLastFrame = 0;
+            pacingBlockSinceLastFrame = 0;
             if (!haveFirstFrame) {
                 haveFirstFrame = 1;
                 result->first_frame_ms = nanos_to_ms(frameNanos);
             }
-            if (!openedOutput) {
-                // 直到第一帧解出来才知道真实分辨率，输出模块必须在此刻初始化
+            if (!openedOutput && pacingNspf == 0) {
+                // 非定速：直到第一帧解出来才知道真实分辨率，在本线程初始化输出。
+                // 定速时输出模块改由出帧线程初始化，这里只负责回填分辨率。
                 if (output_open(&out, "null", "/dev/null", &pic.p, fps) < 0) {
                     txav1d_picture_unref(&pic);
                     snprintf(failMsg, sizeof(failMsg), "初始化输出模块失败");
@@ -372,6 +638,8 @@ int txav1d_bench(const Txav1dBenchConfig *const cfg,
                     break;
                 }
                 openedOutput = 1;
+            }
+            if (result->width == 0) {
                 result->width = pic.p.w;
                 result->height = pic.p.h;
                 result->bpc = pic.p.bpc;
@@ -394,30 +662,26 @@ int txav1d_bench(const Txav1dBenchConfig *const cfg,
             frameMs[decoded] = nanos_to_ms(frameNanos);
             decoded++;
 
-            // null muxer 的 write_picture 内部会调用 picture_unref，
-            // 这里不能再 unref，否则是 double free。
-            if (output_write(out, &pic) < 0) {
-                snprintf(failMsg, sizeof(failMsg), "输出帧失败");
-                failed = 1;
-                break;
-            }
-
-            // ---- 定速节流 ----
-            // 以「第 n 帧的绝对应产出时刻」为基准等待，而不是每帧固定 sleep
-            // 一帧时长：解码本身有快有慢，逐帧固定等待会把偏差累加成漂移，
-            // 跑几千帧后实际帧率会明显偏离目标。
             if (pacingNspf != 0) {
-                const uint64_t deadline = pacingNspf * (uint64_t)decoded;
-                const uint64_t elapsedAfter = bench_now_nanos() - tStart;
-                if (elapsedAfter < deadline) {
-                    const uint64_t waitStart = bench_now_nanos();
-                    bench_sleep_nanos(deadline - elapsedAfter);
-                    pacingWaitNanos += bench_now_nanos() - waitStart;
+                // 定速：把帧交给出帧线程（满则阻塞 = 背压），pic 所有权随之转移，
+                // 本线程不再 unref/write。解码路径上没有任何 sleep，所以
+                // decode_ms / frame_ms 保持纯解码能力，节拍完全由出帧线程承担。
+                uint64_t blockNanos = 0;
+                if (paced_push(&ring, &pic, &bufferFullEvents, &blockNanos) < 0) {
+                    snprintf(failMsg, sizeof(failMsg), "%s",
+                             ring.err_msg[0] ? ring.err_msg : "出帧线程异常");
+                    failed = 1;
+                    break;
                 }
-                // 把节流等待排除出单帧耗时：lastFrameNanos 推到等待结束之后，
-                // 下一帧的间隔里就不含这段空转。否则定速下的 ms/f 会恰好等于
-                // 目标帧间隔，得到「解码速度和目标帧率完全一致」的假象。
-                lastFrameNanos = bench_now_nanos();
+                pacingBlockSinceLastFrame += blockNanos;
+            } else {
+                // 非定速：null muxer 的 write_picture 内部会 unref，
+                // 这里不能再 unref，否则是 double free。
+                if (output_write(out, &pic) < 0) {
+                    snprintf(failMsg, sizeof(failMsg), "输出帧失败");
+                    failed = 1;
+                    break;
+                }
             }
 
             if (cfg->limit > 0 && decoded >= cfg->limit) break;
@@ -437,8 +701,12 @@ int txav1d_bench(const Txav1dBenchConfig *const cfg,
             decodeNanos += nowNanos - t0;
 
             uint64_t frameNanos = nowNanos - lastFrameNanos;
+            if (pacingBlockSinceLastFrame < frameNanos) {
+                frameNanos -= pacingBlockSinceLastFrame;
+            }
             lastFrameNanos = nowNanos;
             demuxSinceLastFrame = 0;
+            pacingBlockSinceLastFrame = 0;
             if (!haveFirstFrame) {
                 haveFirstFrame = 1;
                 result->first_frame_ms = nanos_to_ms(frameNanos);
@@ -454,24 +722,43 @@ int txav1d_bench(const Txav1dBenchConfig *const cfg,
             frameMs[decoded] = nanos_to_ms(frameNanos);
             decoded++;
 
-            if (output_write(out, &pic) < 0) break;
-
-            // 冲刷阶段的帧同样受定速约束：这些帧在 CLI 里也走同一个
-            // synchronize()，若这里跳过，长尾帧会在最后瞬间倾泻出来，
-            // 实际平均帧率高于目标值。
             if (pacingNspf != 0) {
-                const uint64_t deadline = pacingNspf * (uint64_t)decoded;
-                const uint64_t elapsedAfter = bench_now_nanos() - tStart;
-                if (elapsedAfter < deadline) {
-                    const uint64_t waitStart = bench_now_nanos();
-                    bench_sleep_nanos(deadline - elapsedAfter);
-                    pacingWaitNanos += bench_now_nanos() - waitStart;
-                }
-                lastFrameNanos = bench_now_nanos();
+                // 冲刷阶段的帧同样交给出帧线程，长尾帧也会按目标帧率被节拍，
+                // 不会在最后瞬间倾泻出来。
+                uint64_t blockNanos = 0;
+                if (paced_push(&ring, &pic, &bufferFullEvents, &blockNanos) < 0) break;
+                pacingBlockSinceLastFrame += blockNanos;
+            } else {
+                if (output_write(out, &pic) < 0) break;
             }
 
             if (cfg->limit > 0 && decoded >= cfg->limit) break;
         }
+    }
+
+    // ---- 定速：通知出帧线程解码已结束，等它排空缓冲并收尾 ----
+    // total_ms 必须等出帧线程把最后一帧按帧率写完才算数，所以 totalNanos
+    // 在 join 之后再取。解码线程到这里已不再占用解码器，CPU 统计也到此为止。
+    if (consumerStarted) {
+        pthread_mutex_lock(&ring.lock);
+        ring.producer_done = 1;
+        if (failed) ring.producer_abort = 1;   // 失败则让出帧线程立即丢帧退出
+        pthread_cond_signal(&ring.not_empty);
+        pthread_cond_signal(&ring.not_full);
+        pthread_mutex_unlock(&ring.lock);
+        pthread_join(consumerThread, NULL);
+
+        pacingWaitNanos = ring.wait_nanos;
+        if (ring.consumer_error && !failed) {
+            snprintf(failMsg, sizeof(failMsg), "%s",
+                     ring.err_msg[0] ? ring.err_msg : "出帧线程异常");
+            failed = 1;
+        }
+        // 出帧线程初始化的输出模块由它持有，统一在这里关闭
+        out = ring.out;
+        // 出帧线程到点取不到帧的次数 = 缓冲空饥饿次数。它在取帧处无法直接
+        // 计数（取帧与节拍解耦），这里用「写出帧数 < 解码帧数且缓冲曾为空」
+        // 近似并不可靠，改为在出帧线程内按实际饥饿累计（见 starve_events）。
     }
 
     const uint64_t totalNanos = bench_now_nanos() - tStart;
@@ -480,6 +767,16 @@ int txav1d_bench(const Txav1dBenchConfig *const cfg,
     if (out) output_close(out);
     txav1d_close(&c);
     input_close(in);
+
+    if (consumerStarted) {
+        result->buffer_capacity = ringCapacity > 0 ? ringCapacity - 1 : 0;
+        result->buffer_full_events = bufferFullEvents;
+        result->buffer_starve_events = ring.starve_events;
+        free(ring.slots);
+        pthread_mutex_destroy(&ring.lock);
+        pthread_cond_destroy(&ring.not_full);
+        pthread_cond_destroy(&ring.not_empty);
+    }
 
     // ---- 汇总统计 ----
     result->decoded_frames = decoded;

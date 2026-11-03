@@ -59,6 +59,17 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) BenchSchedulePolicy schedulePolicy;
 
 /**
+ * 是否按 PlayerCore 口径下发线程参数。
+ *
+ * NO（默认）：解码器能力口径，txav1d 写 reserved[0]，填几个线程就真跑几个，
+ *     用于线程扩展性对比。
+ * YES：复刻 FFmpeg libtxav1d / libdav1d 封装，frame delay 按封装公式推导。
+ *     自动档取 CPU 核数且不写 reserved[0]（txav1d 按线上截断）；
+ *     手动指定线程时写 reserved[0]，两个解码器线程数一致生效。
+ */
+@property (nonatomic, assign) BOOL playerCoreThreading;
+
+/**
  * 定速解码（pacing）。
  *
  * 对应解码库命令行里的 `--realtime`：按目标帧率对齐每帧的产出时刻，
@@ -147,6 +158,17 @@ FOUNDATION_EXPORT NSString *BenchDecoderVersionDescription(void);
 @property (nonatomic, assign) double pacingFPS;
 /** 本轮累计节流等待时长（毫秒），用于核对 totalMs 的构成 */
 @property (nonatomic, assign) double pacingWaitMs;
+
+/**
+ * 定速缓冲观测，反映「解码跟不跟得上目标帧率」。非定速时均为 0。
+ *
+ * bufferStarveEvents 大于 0 是最关键的信号：出帧线程到点却取不到帧，
+ * 说明解码产能撑不住目标帧率，实时播放会卡顿。bufferFullEvents 大说明
+ * 解码轻松跑在目标帧率之上（缓冲常满、触发背压）。
+ */
+@property (nonatomic, assign) NSInteger bufferCapacity;
+@property (nonatomic, assign) NSUInteger bufferFullEvents;
+@property (nonatomic, assign) NSUInteger bufferStarveEvents;
 
 /**
  * 实际产帧率 = 解码帧数 / 端到端墙钟时长。
@@ -258,6 +280,15 @@ FOUNDATION_EXPORT NSString *BenchDecoderVersionDescription(void);
 @property (nonatomic, readonly) double footprintDeltaKBPerFrame;
 
 @property (nonatomic, assign) NSInteger peakThreadCount;
+
+/**
+ * 实际下发给解码器的线程参数（取库回填值，而非配置值）。
+ * appliedThreadOverride 为 0 表示未写 reserved[0]，txav1d 库内部可能截断线程数。
+ */
+@property (nonatomic, assign) BOOL appliedPlayerCoreThreading;
+@property (nonatomic, assign) NSInteger appliedNThreads;
+@property (nonatomic, assign) NSInteger appliedThreadOverride;
+@property (nonatomic, assign) NSInteger appliedFrameDelay;
 
 @end
 
