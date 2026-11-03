@@ -129,9 +129,37 @@ FOUNDATION_EXPORT NSString *BenchDecoderVersionDescription(void);
  *
  * 这是主指标。之所以不直接存「核心数」，是因为百分比是线性可加的原始量，
  * 进均值、峰值、比值都无需还原；核心数、整机占比都由它换算，见下方只读属性。
+ *
+ * avgCPUPercent 由整轮同步差分得出，精确覆盖解码区间，不受轮次长短影响。
  */
 @property (nonatomic, assign) double avgCPUPercent;
 @property (nonatomic, assign) double peakCPUPercent;
+
+/**
+ * 本轮是否真的采到了 CPU 数据。
+ *
+ * 短轮次下若区间统计也失效（极端时钟跳变），该值为 NO。此时必须显示「无采样」
+ * 而不是 0%——0% 会被读成「几乎不占 CPU」，与「没测到」是完全不同的结论，
+ * 混在横向对比表里会直接导致选错版本。
+ */
+@property (nonatomic, assign) BOOL cpuSampled;
+
+/**
+ * 本轮 CPU 统计区间的墙钟时长与 CPU 时长（毫秒），仅用于诊断。
+ *
+ * 二者比值即 avgCPUPercent。当它与解码器自报的 totalMs 相差很大时，
+ * 说明区间里混入了大量非解码开销，此时 CPU 均值会被系统性稀释。
+ */
+@property (nonatomic, assign) double cpuIntervalWallMs;
+@property (nonatomic, assign) double cpuIntervalCPUMs;
+
+/**
+ * 峰值是否为真实峰值。
+ *
+ * YES 表示定时器在轮内至少命中一次，峰值可信；NO 表示轮次短于采样间隔，
+ * 峰值退化为平均值，只能当参考，不应用于「谁的瞬时峰值更省」这类判断。
+ */
+@property (nonatomic, assign) BOOL peakCPUSampled;
 
 /** 核心等价占用 = avgCPUPercent / 100，如 2.35 表示平均占满 2.35 个核 */
 @property (nonatomic, readonly) double avgCPUCores;
@@ -164,6 +192,14 @@ FOUNDATION_EXPORT NSString *BenchDecoderVersionDescription(void);
 @property (nonatomic, assign) double baselineFootprintMB;
 @property (nonatomic, assign) double peakFootprintMB;
 @property (nonatomic, assign) double avgFootprintMB;
+
+/**
+ * 本轮是否采到内存数据。
+ *
+ * 定时器未命中时会用轮末快照兜底，此时 peakFootprintMB 是「下界」而非全程峰值，
+ * 但比显示 0 MB 更接近事实：解码结束后帧池与线程栈仍然驻留，快照包含这些开销。
+ */
+@property (nonatomic, assign) BOOL memorySampled;
 
 /** 解码器自身内存开销 = peakFootprintMB - baselineFootprintMB，不小于 0 */
 @property (nonatomic, readonly) double footprintDeltaMB;
@@ -202,6 +238,20 @@ FOUNDATION_EXPORT NSString *BenchDecoderVersionDescription(void);
 @property (nonatomic, readonly) double peakCPUCores;
 @property (nonatomic, readonly) double cpuSharePercent;  ///< 占设备总算力的比例
 @property (nonatomic, readonly) double cpuSecondsPerFrame; ///< 每帧核心·秒，越低越高效
+
+/**
+ * 是否有任一计分轮采到了 CPU 数据。
+ *
+ * 为 NO 时，avgCPUPercent、cpuSharePercent、cpuSecondsPerFrame 全都是占位值 0，
+ * 展示层必须显示「无采样」，否则会把「没测到」误读成「几乎不占 CPU」。
+ */
+@property (nonatomic, readonly) BOOL avgCPUSampled;
+
+/// 峰值是否为真实峰值（任一轮定时器命中即可）
+@property (nonatomic, readonly) BOOL peakCPUSampled;
+
+/// 是否有任一计分轮采到内存数据
+@property (nonatomic, readonly) BOOL memorySampled;
 
 @property (nonatomic, readonly) double avgFootprintMB;
 @property (nonatomic, readonly) double peakFootprintMB;

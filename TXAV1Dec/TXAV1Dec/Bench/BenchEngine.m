@@ -214,8 +214,37 @@ NSString *BenchDecoderVersionDescription(void) {
 - (double)avgCPUPercent {
     if (self.scoredRounds.count == 0) return 0;
     double sum = 0;
-    for (BenchRoundMetrics *r in self.scoredRounds) sum += r.avgCPUPercent;
-    return sum / (double)self.scoredRounds.count;
+    NSUInteger used = 0;
+    for (BenchRoundMetrics *r in self.scoredRounds) {
+        // 只累加真正采到的轮次：把无采样的 0 混进均值会把整体水平拉低，
+        // 这正是「多版本连测时 CPU 显示 0.00%」的直接来源。
+        if (!r.cpuSampled) continue;
+        sum += r.avgCPUPercent;
+        used++;
+    }
+    if (used == 0) return 0;
+    return sum / (double)used;
+}
+
+- (BOOL)avgCPUSampled {
+    for (BenchRoundMetrics *r in self.scoredRounds) {
+        if (r.cpuSampled) return YES;
+    }
+    return NO;
+}
+
+- (BOOL)peakCPUSampled {
+    for (BenchRoundMetrics *r in self.scoredRounds) {
+        if (r.peakCPUSampled) return YES;
+    }
+    return NO;
+}
+
+- (BOOL)memorySampled {
+    for (BenchRoundMetrics *r in self.scoredRounds) {
+        if (r.memorySampled) return YES;
+    }
+    return NO;
 }
 
 - (double)peakCPUPercent {
@@ -254,8 +283,14 @@ NSString *BenchDecoderVersionDescription(void) {
 - (double)avgFootprintMB {
     if (self.scoredRounds.count == 0) return 0;
     double sum = 0;
-    for (BenchRoundMetrics *r in self.scoredRounds) sum += r.avgFootprintMB;
-    return sum / (double)self.scoredRounds.count;
+    NSUInteger used = 0;
+    for (BenchRoundMetrics *r in self.scoredRounds) {
+        if (!r.memorySampled) continue;
+        sum += r.avgFootprintMB;
+        used++;
+    }
+    if (used == 0) return 0;
+    return sum / (double)used;
 }
 
 - (double)peakFootprintMB {
@@ -269,8 +304,14 @@ NSString *BenchDecoderVersionDescription(void) {
 - (double)avgResidentMB {
     if (self.scoredRounds.count == 0) return 0;
     double sum = 0;
-    for (BenchRoundMetrics *r in self.scoredRounds) sum += r.avgResidentMB;
-    return sum / (double)self.scoredRounds.count;
+    NSUInteger used = 0;
+    for (BenchRoundMetrics *r in self.scoredRounds) {
+        if (!r.memorySampled) continue;
+        sum += r.avgResidentMB;
+        used++;
+    }
+    if (used == 0) return 0;
+    return sum / (double)used;
 }
 
 - (double)peakResidentMB {
@@ -358,30 +399,54 @@ NSString *BenchDecoderVersionDescription(void) {
     // 整机占比放首位：这是「这 App 吃了多少 CPU」的直觉答案，也是跨机型唯一可比的量。
     // 单核口径与核心数随后并出，需要和 Instruments 对照时用它们换算。
     const NSInteger cores = [BenchSystemMetrics processorCount];
-    [text appendFormat:@"平均 CPU      : 整机 %.1f%% = %.0f%% 单核口径 = %.2f 核（本机 %ld 核）\n",
-        self.cpuSharePercent, self.avgCPUPercent, self.avgCPUCores, (long)cores];
-    [text appendFormat:@"峰值 CPU      : %.1f%% 单核口径 = %.2f 核\n",
-        self.peakCPUPercent, self.peakCPUCores];
+    if (self.avgCPUSampled) {
+        [text appendFormat:@"平均 CPU      : 整机 %.1f%% = %.0f%% 单核口径 = %.2f 核（本机 %ld 核）\n",
+            self.cpuSharePercent, self.avgCPUPercent, self.avgCPUCores, (long)cores];
+    } else {
+        // 无采样不等于低占用：这里必须显式说明，否则 0% 会被当成「省 CPU」
+        [text appendFormat:@"平均 CPU      : 无采样（本轮时长过短或系统时钟跳变，未取得有效样本）\n"];
+    }
+    if (self.peakCPUSampled) {
+        [text appendFormat:@"峰值 CPU      : %.1f%% 单核口径 = %.2f 核\n",
+            self.peakCPUPercent, self.peakCPUCores];
+    } else if (self.avgCPUSampled) {
+        [text appendFormat:@"峰值 CPU      : 未采到瞬时峰值，仅整轮均值 %.1f%%（轮次短于采样间隔）\n",
+            self.peakCPUPercent];
+    } else {
+        [text appendFormat:@"峰值 CPU      : 无采样\n"];
+    }
 
     // 内存：绝对值回答「会不会被杀」，增量回答「解码器自己占多少」
     BenchRoundMetrics *baselineSample = self.scoredRounds.firstObject;
     [text appendFormat:@"内存基线      : footprint %.1f MB（解码器初始化前）\n",
         baselineSample ? baselineSample.baselineFootprintMB : 0];
-    [text appendFormat:@"内存 footprint: 峰 %.1f MB（含 App 常驻）\n", self.peakFootprintMB];
-    [text appendFormat:@"解码器净开销  : %.1f MB  (%.1f KB/帧)  ← 横向对比看这个\n",
-        self.footprintDeltaMB, self.footprintDeltaKBPerFrame];
-    [text appendFormat:@"内存 resident : 峰 %.1f MB（交叉验证，噪声较大）\n", self.peakResidentMB];
+    if (self.memorySampled) {
+        [text appendFormat:@"内存 footprint: 峰 %.1f MB（含 App 常驻）\n", self.peakFootprintMB];
+        [text appendFormat:@"解码器净开销  : %.1f MB  (%.1f KB/帧)  ← 横向对比看这个\n",
+            self.footprintDeltaMB, self.footprintDeltaKBPerFrame];
+        [text appendFormat:@"内存 resident : 峰 %.1f MB（交叉验证，噪声较大）\n", self.peakResidentMB];
+    } else {
+        [text appendFormat:@"内存 footprint: 无采样\n"];
+        [text appendFormat:@"解码器净开销  : 无采样\n"];
+        [text appendFormat:@"内存 resident : 无采样\n"];
+    }
 
     [text appendString:@"\n---------- 逐轮明细 ----------\n"];
     const NSInteger roundCores = [BenchSystemMetrics processorCount];
     for (BenchRoundMetrics *r in self.scoredRounds) {
         // 逐轮也用整机占比：明细和上方汇总必须是同一把尺子，
         // 否则同一份报告里两个百分数会互相矛盾。单核口径并列在括号里备查。
-        [text appendFormat:@"#%lu  %.4f ms/f  P50 %.4f  P95 %.4f  "
-                           @"CPU 整机 %.1f%%(%.1f%% 单核)  净内存 %.1fMB\n",
+        NSString *cpuText = r.cpuSampled
+            ? [NSString stringWithFormat:@"CPU 整机 %.1f%%(%.1f%% 单核)",
+               roundCores > 0 ? r.avgCPUPercent / (double)roundCores : 0,
+               r.avgCPUPercent]
+            : @"CPU 无采样";
+        NSString *memText = r.memorySampled
+            ? [NSString stringWithFormat:@"净内存 %.1fMB", r.footprintDeltaMB]
+            : @"净内存 无采样";
+        [text appendFormat:@"#%lu  %.4f ms/f  P50 %.4f  P95 %.4f  %@  %@\n",
             (unsigned long)r.index, r.avgFrameMs, r.p50FrameMs, r.p95FrameMs,
-            roundCores > 0 ? r.avgCPUPercent / (double)roundCores : 0,
-            r.avgCPUPercent, r.footprintDeltaMB];
+            cpuText, memText];
     }
 
     return text;
@@ -642,7 +707,18 @@ NSString *BenchDecoderVersionDescription(void) {
         return nil;
     }
 
+    // 区间起点紧贴解码调用：只要中间夹了别的准备工作，CPU 平均值就会被稀释。
+    [self.metrics beginCPUInterval];
     const int status = [decoder runBenchWithConfig:&cfg result:&result];
+
+    // 区间 CPU 必须在解码返回后立刻取：区间越贴近真实解码段，
+    // 混入的收尾开销越少。这里取到的是「整轮平均占用」，与轮次长短无关。
+    const double intervalCPU = [self.metrics cpuPercentSinceIntervalBegin];
+
+    // 定时器可能一次都没触发（单轮短于采样间隔），此时峰值与内存样本均为空。
+    // 解码器返回后会保留帧池、线程栈等结构，轮末快照仍是这些开销的有效下界，
+    // 因此用它兜底；否则会退化成「内存 0 MB」，比不显示更误导。
+    BenchMemorySnapshot *endSnapshot = [BenchSystemMetrics currentMemorySnapshot];
 
     os_unfair_lock_lock(&_sampleLock);
     self.samplingActive = NO;
@@ -656,6 +732,25 @@ NSString *BenchDecoderVersionDescription(void) {
     const NSUInteger memorySamples = self.currentRoundMemorySamples;
     const NSInteger peakThreads = self.currentRoundPeakThreads;
     os_unfair_lock_unlock(&_sampleLock);
+
+    // 内存：定时器采到就用它的峰值与均值（能看到解码中段的高点）；
+    // 没采到就退回轮末快照，并显式标记为「下界」而非「平均值」。
+    BOOL memorySampled = (memorySamples > 0);
+    double roundPeakFootprint = peakFootprint;
+    double roundPeakResident = peakResident;
+    double roundAvgFootprint = 0;
+    double roundAvgResident = 0;
+    if (memorySampled) {
+        roundAvgFootprint = footprintSum / (double)memorySamples;
+        roundAvgResident = residentSum / (double)memorySamples;
+    } else if (endSnapshot.valid) {
+        // 单一样本：峰值即该样本，均值也取它，避免出现 0 值参与后续均值。
+        roundPeakFootprint = endSnapshot.footprintMB;
+        roundPeakResident = endSnapshot.residentMB;
+        roundAvgFootprint = endSnapshot.footprintMB;
+        roundAvgResident = endSnapshot.residentMB;
+        memorySampled = YES;
+    }
 
     BenchRoundMetrics *metrics = [[BenchRoundMetrics alloc] init];
     metrics.decodedFrames = result.decoded_frames;
@@ -675,20 +770,40 @@ NSString *BenchDecoderVersionDescription(void) {
     metrics.p50FrameMs = result.p50_frame_ms;
     metrics.p95FrameMs = result.p95_frame_ms;
 
-    metrics.peakCPUPercent = peakCPU;
-    metrics.peakThreadCount = peakThreads;
-    metrics.avgCPUPercent = cpuSamples > 0 ? cpuSum / (double)cpuSamples : 0;
+    // 平均值改用整轮同步差分：它覆盖解码全程、与轮次长短无关。
+    // 区间无效（时钟跳变等）时退回定时器均值；两者都没有就标记为「无采样」。
+    metrics.cpuSampled = (intervalCPU >= 0) || (cpuSamples > 0);
+    metrics.cpuIntervalWallMs = [self.metrics lastIntervalWallMilliseconds];
+    metrics.cpuIntervalCPUMs = [self.metrics lastIntervalCPUMilliseconds];
+    if (intervalCPU >= 0) {
+        metrics.avgCPUPercent = intervalCPU;
+    } else if (cpuSamples > 0) {
+        metrics.avgCPUPercent = cpuSum / (double)cpuSamples;
+    } else {
+        metrics.avgCPUPercent = 0;
+    }
 
-    metrics.peakFootprintMB = peakFootprint;
-    metrics.peakResidentMB = peakResident;
+    // 峰值只来自定时器：区间差分只能得到平均值，看不到区间内部的起伏。
+    // 定时器一次都没触发时峰值未知，用平均值兜底并标记来源，
+    // 避免把它当成「真实峰值」参与跨版本比较。
+    if (cpuSamples > 0) {
+        metrics.peakCPUPercent = peakCPU;
+        metrics.peakCPUSampled = YES;
+    } else {
+        metrics.peakCPUPercent = metrics.avgCPUPercent;
+        metrics.peakCPUSampled = NO;
+    }
+    metrics.peakThreadCount = peakThreads;
+
+    metrics.memorySampled = memorySampled;
+    metrics.peakFootprintMB = roundPeakFootprint;
+    metrics.peakResidentMB = roundPeakResident;
     // 记录空载基线（而非本轮基线），这样 footprintDeltaMB 在任何轮次都等于
     // 「相对 App 空载时的净增量」，跨轮、跨码流可直接比较。
     metrics.baselineFootprintMB = [BenchSystemMetrics idleBaselineFootprintMB];
     metrics.baselineResidentMB = baseline.residentMB;
-    if (memorySamples > 0) {
-        metrics.avgFootprintMB = footprintSum / (double)memorySamples;
-        metrics.avgResidentMB = residentSum / (double)memorySamples;
-    }
+    metrics.avgFootprintMB = roundAvgFootprint;
+    metrics.avgResidentMB = roundAvgResident;
 
     // 逐帧数组由 dylib 内部 malloc 分配，必须由同一个库释放：
     // 换 App 侧释放或跨版本释放会破坏堆。
@@ -703,14 +818,18 @@ NSString *BenchDecoderVersionDescription(void) {
 - (void)startSampling {
     if (self.sampleTimer) return;
 
-    // 100ms 一次：足够捕捉解码过程中的负载起伏，又不会让采样本身产生明显开销
-    const uint64_t intervalNanos = 100ULL * NSEC_PER_MSEC;
+    // 采样间隔要明显小于最短单轮时长，否则一整轮可能一次都不触发，
+    // 峰值与内存曲线直接丢失（实测 30 帧单轮约 33ms，100ms 间隔命中率几乎为 0）。
+    // 25ms 在 iPhone 上开销可忽略（每次采样仅两次 task_info 系统调用），
+    // 又能保证 30ms 的短轮至少命中一次。
+    const uint64_t intervalNanos = 25ULL * NSEC_PER_MSEC;
     dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
                                                      dispatch_get_main_queue());
+    // leeway 给到间隔的一半：系统可以合并唤醒省电，又不会因此错过整轮。
     dispatch_source_set_timer(timer,
                               dispatch_time(DISPATCH_TIME_NOW, intervalNanos),
                               intervalNanos,
-                              10ULL * NSEC_PER_MSEC);
+                              12ULL * NSEC_PER_MSEC);
 
     __weak typeof(self) weakSelf = self;
     dispatch_source_set_event_handler(timer, ^{
@@ -727,9 +846,13 @@ NSString *BenchDecoderVersionDescription(void) {
         const NSInteger threads = [BenchSystemMetrics currentThreadCount];
 
         os_unfair_lock_lock(&self->_sampleLock);
-        self.currentRoundCPUSum += cpu;
-        self.currentRoundCPUSamples += 1;
-        if (cpu > self.currentRoundPeakCPU) self.currentRoundPeakCPU = cpu;
+        // 负值代表本次采样无效（超出物理上限或计数器倒退），
+        // 直接跳过：0 会被当成「几乎不占 CPU」拉低均值。
+        if (cpu >= 0) {
+            self.currentRoundCPUSum += cpu;
+            self.currentRoundCPUSamples += 1;
+            if (cpu > self.currentRoundPeakCPU) self.currentRoundPeakCPU = cpu;
+        }
 
         // task_info 偶发失败时各字段为 0，若照常累加会把均值严重拉低，
         // 因此只在读取成功时计入本次内存采样。

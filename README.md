@@ -187,12 +187,13 @@ xcodebuild -project TXAV1Dec.xcodeproj -scheme TXAV1Dec \
 
 界面上的「解码器版本（可多选）」与码流选择是同一套交互：点开弹出列表，勾选一个或多个版本。**版本列表直接来自 `DecoderSDK` 下的子目录名**，新增版本只需放一个目录并重新编译，界面自动多出一项，不需要改任何代码。
 
-目录名就是界面上显示的版本标识，目前有五项：
+目录名就是界面上显示的版本标识，目前有六项：
 
 ```
 TXAV1Dec/TXAV1Dec/DecoderSDK/
 ├── txav1d142/{include, lib/libtxav1d.a}
 ├── txav1d143/{include, lib/libtxav1d.a}
+├── txav1d154/{include, lib/libtxav1d.a}
 ├── dav1d150/{include, src, lib/libdav1d.a}
 ├── dav1d151/{include, src, lib/libdav1d.a}
 ├── dav1d154/{include, src, lib/libdav1d.a}
@@ -201,6 +202,8 @@ TXAV1Dec/TXAV1Dec/DecoderSDK/
 ```
 
 目录名不必是三点式版本号。构建脚本会从头文件的 `TXAV1D_VERSION` / `DAV1D_VERSION` 宏取出真实版本串，再与目录名里的数字做压缩比对：`dav1d154` ↔ `"1.5.4"`、`txav1d143` ↔ `"1.4.3"` 都算一致。这样换库漏改目录名时仍会中止构建，而不会安静地跑错版本。
+
+`txav1d154` 与 `dav1d154` 是同一份 1.5.4 代码的两种封装：前者保留 `txav1d_` 原生前缀（带 `use_wpp` 扩展，与 `txav1d142/143` 同源可比），后者是上游 `dav1d_` 前缀经兼容层映射，用于对齐官方版本表现。两者数值不可混为一谈。
 
 ### 解码器的惰性加载
 
@@ -227,6 +230,38 @@ TXAV1Dec/TXAV1Dec/DecoderSDK/
 工程没有为此复制一份 tools 源码，而是在 `<版本>/include/txav1d/` 下放了一层名字映射头：共用源码原样编译，`txav1d_open`、`Txav1dPicture` 等由宏解析到 `dav1d_*` / `Dav1d*`。真正需要包装的只有 `txav1d_default_settings` 与 `txav1d_open` 两个（因为设置结构体多了 `use_wpp`，必须逐字段搬运），实现放在 `<版本>/src/txav1d_shim.c`。
 
 这样共用代码路径始终只有一份。若复制源码改名，将来每加一个解码器族都要再复制一次，迟早出现「改了一份漏了另一份」的静默错配。
+
+### 自己接入一个新版本
+
+新增 txav1d 版本不需要改任何代码，只有文件搬运和一次编译。以 `txav1d154` 为例：
+
+```
+# 1. 建目录并放入产物（目录名决定界面上的版本标识）
+cd TXAV1Dec/TXAV1Dec/DecoderSDK
+mkdir -p txav1dNNN/lib txav1dNNN/include
+cp <产物>/lib/libtxav1d.a            txav1dNNN/lib/
+cp -R <产物>/include/*               txav1dNNN/include/
+
+# 2. 补上 common/ 头（共用 bench 源码依赖它，产物包通常不带）
+cp <源码>/include/common/{attributes,intops}.h  txav1dNNN/include/common/
+
+# 3. 直接 Xcode 编译即可，构建脚本会自动发现并产出 libtxav1d_txav1dNNN.dylib
+```
+
+三个容易踩的点：
+
+- **目录名里的数字必须与库的版本串一致**。构建脚本会交叉校验目录名、`include/txav1d/vcs_version.h` 的宏、静态库里 `strings` 出来的版本串，三者对不上就中止构建。这是故意设计的：换库漏改目录名会造成「界面写 A、实际跑 B」，而这种错配从性能数据上完全看不出来。
+- **`common/` 不能忘**。它是 `DecoderTools` 共用源码的编译依赖，库的发布包里通常没有这一层，缺了会在编译 dylib 时报找不到 `common/attributes.h`。
+- **版本串可能和你想的不一样**。txav1d 的版本号写在 `CMakeLists.txt` 的 `TXAV1D_API_VERSION_*` 里，由 `python cmake_build.py -v X.Y.Z` 同步到各处；只更新 `src/` 而不升版本号，产物内嵌的仍是旧版本串。给库起目录名前先跑一次 `strings libtxav1d.a | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$'` 确认它自报的版本。
+
+接入完成后建议跑一次全版本自测确认新库真能解出数据：
+
+```
+xcrun devicectl device process launch --device <UDID> --terminate-existing <bundleID> \
+  -- --selftest --all-decoders --frames 30 --rounds 1
+```
+
+日志写在 App 容器 `Documents/selftest.log`，用 `devicectl device copy from` 取回。
 
 `use_wpp` 在 dav1d 侧固定填 -1 并忽略任何非 -1 值，因为上游始终启用 WPP。若填 0，共用源码会以为「已关闭」，报告里就会写下与实际不符的配置。
 

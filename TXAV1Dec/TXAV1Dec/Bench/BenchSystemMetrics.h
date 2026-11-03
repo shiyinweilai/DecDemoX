@@ -67,8 +67,18 @@ typedef NS_ENUM(NSInteger, BenchSchedulePolicy) {
 /**
  * 进程级性能指标采集器。
  *
- * CPU 使用率基于「线程 CPU 时间差分」计算，单次调用只能得到「自上次调用以来」的
- * 平均值，因此必须在测试过程中按固定间隔反复采样，才能反映真实负载曲线。
+ * CPU 使用率基于「线程 CPU 时间差分」计算，单次调用只能得到「自上次调用以来」
+ * 的平均值。这里提供两套互不干扰的口径，各自解决不同问题：
+ *
+ * 1. 整轮同步差分（beginCPUInterval / cpuPercentSinceIntervalBegin）
+ *    在解码调用前后各取一次累计 CPU 时间，直接用「区间 CPU 时间 ÷ 区间墙钟时间」
+ *    得到整轮平均占用。这是平均值的主口径：它精确覆盖整个解码区间，不会漏采，
+ *    也不受单轮时长影响，因此在 60ms 这种短轮次下同样准确。
+ *
+ * 2. 定时器滚动采样（reset / sampleCPUPercentOfCore）
+ *    每次调用推进一次滚动基线，得到相邻两次采样之间的瞬时占用，用于求峰值。
+ *    它依赖调用频率，轮次短于采样间隔时会一次都采不到，所以只用来补峰值，
+ *    不承担平均值职责。
  */
 @interface BenchSystemMetrics : NSObject
 
@@ -149,8 +159,40 @@ typedef NS_ENUM(NSInteger, BenchSchedulePolicy) {
  * 返回值 100 表示占满一个核心，600 表示 6 核全部占满。
  * 这是「解码器占几个核」的唯一正确来源，界面与报告都基于它换算，
  * 不再单独采集一组相互独立的百分比，避免口径打架。
+ *
+ * 注意：本方法只反映「自上次调用以来」的平均值，轮次短于采样间隔时会返回 0，
+ * 因此仅用于求峰值曲线。整轮平均值请用下方 cpuPercentSinceIntervalBegin。
  */
 - (double)sampleCPUPercentOfCore;
+
+/**
+ * 开始一个 CPU 统计区间，记录当前累计 CPU 时间与墙钟时刻。
+ *
+ * 与 cpuPercentSinceIntervalBegin 成对使用，把解码调用夹在中间，即可得到
+ * 该区间的真实平均占用。区间方法完全独立于定时器与 reset，两者可并存：
+ * 前者保证平均值完整覆盖整轮，后者只负责捕捉瞬时峰值。
+ */
+- (void)beginCPUInterval;
+
+/**
+ * 返回自 beginCPUInterval 以来整个区间的 CPU 平均占用（单核百分比）。
+ *
+ * 语义就是「这段时间里平均占满了几个核 ×  100」，因此与区间长短无关，
+ * 短至几十毫秒的轮次也能得到稳定结果。
+ *
+ * @return 区间无效（未开始、墙钟时间为 0 或已发生过系统降频跳变）时返回负数，
+ *         调用方据此判定「无采样」，而不是把 0 当成「几乎不占 CPU」。
+ */
+- (double)cpuPercentSinceIntervalBegin;
+
+/**
+ * 最近一次区间的墙钟时长与 CPU 时长（毫秒），仅用于诊断。
+ *
+ * 用途是把「CPU 均值偏低」拆成两种情况：区间本身很短（采样噪声占比高），
+ * 还是区间被非解码开销（文件读取、线程池启停）拉长而稀释了占用率。
+ */
+@property (nonatomic, readonly) double lastIntervalWallMilliseconds;
+@property (nonatomic, readonly) double lastIntervalCPUMilliseconds;
 
 @end
 

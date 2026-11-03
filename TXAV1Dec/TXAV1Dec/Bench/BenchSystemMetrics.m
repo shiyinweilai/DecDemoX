@@ -10,6 +10,7 @@
 #include <mach/mach.h>
 #include <mach/thread_policy.h>
 #include <pthread/qos.h>
+#include <sys/resource.h>
 #include <sys/sysctl.h>
 #include <sys/utsname.h>
 
@@ -28,26 +29,35 @@ static uint64_t BenchNowNanos(void) {
 }
 
 /**
- * 汇总当前进程的累计 CPU 时间（纳秒）。
+ * 汇总当前进程的累计 CPU 时间（纳秒），含全部线程。
  *
- * 用 TASK_THREAD_TIMES_INFO 而不是遍历 task_threads：
- * 前者一次系统调用即返回整个 task 所有线程的累计用户态 + 系统态时间，
- * 后者需要为每个线程取 thread_info 再 deallocate 端口，开销大且
- * 在采样频率较高时容易丢失 mach port。
+ * 这里必须用 getrusage(RUSAGE_SELF)。前面两个方案都实测失败，原因如下：
+ *
+ * 1. 只用 task_info(TASK_THREAD_TIMES_INFO)：XNU 只在线程**终止时**才把它的耗时
+ *    累加进 task 总量，存活线程的实时耗时不在其中。av1d 的 worker 线程整个解码
+ *    期间一直存活，于是平均值只有 8%~17%，同轮峰值却高达 500%。
+ *
+ * 2. 只用 task_threads 遍历存活线程：恰好相反。解码结束时线程池被销毁，
+ *    这些线程的耗时随之从存活集合里消失，计数器非单调，甚至可能倒退。
+ *
+ * 3. 把两者相加：看起来互补，实际会重复计数。线程销毁时它的**历史累计**会被
+ *    整份加进「终止部分」，而「存活部分」只是少了同一份历史值，两者不抵消，
+ *    实测峰值冲到 1147%（6 核理论上限 600%），物理上不可能。
+ *
+ * getrusage(RUSAGE_SELF) 直接返回进程级累计值，天然覆盖存活与已终止线程，
+ * 且单调递增、不会重复计数，与 ps/top 的 TIME 字段同源。
+ * 精度为微秒，对 30ms 级的短区间仍然足够。
  */
 static uint64_t BenchProcessCPUTimeNanos(void) {
-    task_thread_times_info_data_t info;
-    mach_msg_type_number_t count = TASK_THREAD_TIMES_INFO_COUNT;
-    if (task_info(mach_task_self(), TASK_THREAD_TIMES_INFO,
-                  (task_info_t)&info, &count) != KERN_SUCCESS) {
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) != 0) {
         return 0;
     }
-
     uint64_t totalNanos = 0;
-    totalNanos += (uint64_t)info.user_time.seconds * 1000000000ULL;
-    totalNanos += (uint64_t)info.user_time.microseconds * 1000ULL;
-    totalNanos += (uint64_t)info.system_time.seconds * 1000000000ULL;
-    totalNanos += (uint64_t)info.system_time.microseconds * 1000ULL;
+    totalNanos += (uint64_t)usage.ru_utime.tv_sec * 1000000000ULL;
+    totalNanos += (uint64_t)usage.ru_utime.tv_usec * 1000ULL;
+    totalNanos += (uint64_t)usage.ru_stime.tv_sec * 1000000000ULL;
+    totalNanos += (uint64_t)usage.ru_stime.tv_usec * 1000ULL;
     return totalNanos;
 }
 
@@ -106,6 +116,15 @@ static BOOL _benchIdleBaselineCaptured = NO;
     // 上一次采样时刻（纳秒）
     uint64_t _lastSampleNanos;
     BOOL _hasBaseline;
+
+    // 整轮统计区间的起点：与滚动采样基线完全独立，互不影响。
+    uint64_t _intervalStartCPUTimeNanos;
+    uint64_t _intervalStartNanos;
+    BOOL _intervalActive;
+
+    // 最近一次区间的原始耗时，用于诊断「均值被非解码开销稀释」的问题
+    uint64_t _lastIntervalWallNanos;
+    uint64_t _lastIntervalCPUNanos;
 }
 
 #pragma mark - 调度策略
@@ -284,7 +303,52 @@ static BOOL _benchIdleBaselineCaptured = NO;
     }
     // cpuDelta/wallDelta 即「占用了几个核」，乘 100 得到单核百分比口径：
     // 100 = 占满 1 核，800 = 8 核全满
+    const double percent = (double)cpuDelta * 100.0 / (double)wallDelta;
+
+    // 物理上限校验：任何时刻进程占用都不可能超过「核数 × 100%」。
+    // 超过说明统计口径出了问题（实测曾出现 1147%），这类样本必须丢弃。
+    // 返回 -1 而不是 0：0 会被当成「几乎不占 CPU」计入均值与峰值，
+    // 让调用方跳过才能真正剔除。
+    const NSInteger cores = [BenchSystemMetrics processorCount];
+    if (cores > 0 && percent > (double)cores * 100.0) {
+        return -1;
+    }
+    return percent;
+}
+
+- (double)lastIntervalWallMilliseconds {
+    return (double)_lastIntervalWallNanos / 1000000.0;
+}
+
+- (double)lastIntervalCPUMilliseconds {
+    return (double)_lastIntervalCPUNanos / 1000000.0;
+}
+
+- (void)beginCPUInterval {
+    _intervalStartCPUTimeNanos = BenchProcessCPUTimeNanos();
+    _intervalStartNanos = BenchNowNanos();
+    _intervalActive = YES;
+}
+
+- (double)cpuPercentSinceIntervalBegin {
+    if (!_intervalActive) return -1;
+    // 区间到此结束：一次 begin 只允许消费一次结果，避免误用造成重复统计
+    _intervalActive = NO;
+
+    const uint64_t endCPUTimeNanos = BenchProcessCPUTimeNanos();
+    const uint64_t endNanos = BenchNowNanos();
+
+    if (endNanos <= _intervalStartNanos) return -1;
+    // 系统时钟被调整或线程 CPU 计数回落时，差值会下溢成天文数字，
+    // 这类样本必须丢弃，否则会算出几万 % 的假峰值。
+    if (endCPUTimeNanos < _intervalStartCPUTimeNanos) return -1;
+
+    const uint64_t wallDelta = endNanos - _intervalStartNanos;
+    const uint64_t cpuDelta = endCPUTimeNanos - _intervalStartCPUTimeNanos;
+    _lastIntervalWallNanos = wallDelta;
+    _lastIntervalCPUNanos = cpuDelta;
     return (double)cpuDelta * 100.0 / (double)wallDelta;
 }
 
 @end
+

@@ -1247,11 +1247,14 @@
         [mspf addObject:[NSString stringWithFormat:@"%.2f", s.avgFrameMs]];
         // CPU 用整机占比，与报告同口径。两位小数：6 核机上整机占比
         // 一位小数只有 0.6% 单核的精度，两档实现并列时常显示成同一个数。
-        [cpu addObject:[NSString stringWithFormat:@"%.2f%%", s.cpuSharePercent]];
+        // 无采样必须显示 --：0.00% 会被读成「几乎不占 CPU」，与事实相反。
+        [cpu addObject:s.avgCPUSampled
+            ? [NSString stringWithFormat:@"%.2f%%", s.cpuSharePercent] : @"--"];
         [jitter addObject:[NSString stringWithFormat:@"%.2f%%", s.fluctuationPercent]];
         [p95 addObject:[NSString stringWithFormat:@"%.2f",
                         result.rounds.lastObject.p95FrameMs]];
-        [memory addObject:[NSString stringWithFormat:@"%.1f", s.footprintDeltaMB]];
+        [memory addObject:s.memorySampled
+            ? [NSString stringWithFormat:@"%.1f", s.footprintDeltaMB] : @"--"];
     }
 
     // 行序即判读顺序：快不快 → 贵不贵 → 稳不稳。
@@ -1268,7 +1271,9 @@
         @"波动 = 轮间标准差 ÷ 均值。反复跑同一版本时每轮结果的离散程度，反映测试是否稳定；"
         @"它不是帧与帧之间的抖动。有效轮次不足 2 轮时为 0.00%，只说明样本不够，不代表稳定。\n"
         @"P95 = 最后一轮内全部帧耗时排序后的第 95 百分位，即 95% 的帧不慢于该值。"
-        @"它反映帧间抖动，平均值被大量正常帧摊平后看不出偶发长帧，P95 能暴露出来。";
+        @"它反映帧间抖动，平均值被大量正常帧摊平后看不出偶发长帧，P95 能暴露出来。\n"
+        @"显示 -- 表示该轮没有采到有效样本（通常是帧数太少、单轮时长过短），"
+        @"不等于占用为 0；此时应提高每轮帧数后重测。";
 
     self.secondaryLabel.text = [self buildSecondaryInfoText];
 }
@@ -1435,15 +1440,17 @@
             appendPadded(result.decoderDisplayName, 10);
             appendPadded([NSString stringWithFormat:@"%.2f", s.decodeFPS], 9);
             appendPadded([NSString stringWithFormat:@"%.3f", s.avgFrameMs], 9);
-            appendPadded([NSString stringWithFormat:@"%.2f", s.cpuSharePercent], 9);
+            appendPadded(s.avgCPUSampled
+                         ? [NSString stringWithFormat:@"%.2f", s.cpuSharePercent] : @"--", 9);
             appendPadded([NSString stringWithFormat:@"%.2f", s.fluctuationPercent], 9);
             appendPadded([NSString stringWithFormat:@"%.2f",
                           result.rounds.lastObject.p95FrameMs], 9);
-            appendPadded([NSString stringWithFormat:@"%.1f", s.footprintDeltaMB], 11);
+            appendPadded(s.memorySampled
+                         ? [NSString stringWithFormat:@"%.1f", s.footprintDeltaMB] : @"--", 11);
             [text appendString:@"\n"];
         }
 
-        [text appendString:@"\n（CPU% 为整机占比；波动% = 轮间标准差/均值，越低越稳定）\n"];
+        [text appendString:@"\n（CPU% 为整机占比；波动% = 轮间标准差/均值，越低越稳定；-- 表示无有效采样）\n"];
 
         // 同码流跨版本对比：这才是多版本测试真正要看的表。
         // 上面的表按组合罗列，要自己横着找同一个码流的两行再比，
@@ -1487,8 +1494,11 @@
                     NSString *fpsChange = fabs(fpsDelta) < 0.05
                         ? @"持平" : [NSString stringWithFormat:@"%+.1f%%", fpsDelta];
 
+                    // 任一侧无采样就不能算变化的百分比：
+                    // 0 当分母已排除，0 当分子会得出「-100%」这种假结论。
                     NSString *cpuChange = @"--";
-                    if (baseline.cpuSharePercent > 0) {
+                    if (baseline.avgCPUSampled && s.avgCPUSampled
+                        && baseline.cpuSharePercent > 0) {
                         const double cpuDelta =
                             (s.cpuSharePercent / baseline.cpuSharePercent - 1.0) * 100.0;
                         cpuChange = fabs(cpuDelta) < 0.05
@@ -1498,13 +1508,14 @@
                     appendPadded(result.decoderDisplayName, 10);
                     appendPadded([NSString stringWithFormat:@"%.2f", s.decodeFPS], 9);
                     appendPadded(fpsChange, 11);
-                    appendPadded([NSString stringWithFormat:@"%.2f", s.cpuSharePercent], 9);
+                    appendPadded(s.avgCPUSampled
+                                 ? [NSString stringWithFormat:@"%.2f", s.cpuSharePercent] : @"--", 9);
                     appendPadded(cpuChange, 11);
                     appendPadded([NSString stringWithFormat:@"%.3f", s.avgFrameMs], 9);
                     [text appendString:@"\n"];
                 }
             }
-            [text appendString:@"\n（fps 越高越好，CPU% 越低越好；变化幅度在测量波动内即为持平）\n"];
+            [text appendString:@"\n（fps 越高越好，CPU% 越低越好；变化幅度在测量波动内即为持平；-- 表示无有效采样）\n"];
         }
 
         [text appendString:@"\n---------- 逐组合明细 ----------\n"];
@@ -1536,12 +1547,18 @@
                 result.rounds.lastObject.p95FrameMs,
                 s.decodeFPS,
                 result.rounds.lastObject.resolutionDescription];
-            [text appendFormat:@"CPU 整机 %.1f%% = %.0f%% 单核口径 = %.2f 核\n",
-                s.cpuSharePercent, s.avgCPUPercent, s.avgCPUCores];
+            [text appendFormat:@"CPU 整机 %@\n",
+                s.avgCPUSampled
+                    ? [NSString stringWithFormat:@"%.1f%% = %.0f%% 单核口径 = %.2f 核",
+                       s.cpuSharePercent, s.avgCPUPercent, s.avgCPUCores]
+                    : @"无采样"];
             [text appendFormat:@"波动 %.2f%%（轮间标准差 %.4f ms）\n",
                 s.fluctuationPercent, s.stddevFrameMs];
-            [text appendFormat:@"净内存 %.1f MB（峰值 %.1f MB，resident 峰 %.1f MB）\n",
-                s.footprintDeltaMB, s.peakFootprintMB, s.peakResidentMB];
+            [text appendFormat:@"净内存 %@\n",
+                s.memorySampled
+                    ? [NSString stringWithFormat:@"%.1f MB（峰值 %.1f MB，resident 峰 %.1f MB）",
+                       s.footprintDeltaMB, s.peakFootprintMB, s.peakResidentMB]
+                    : @"无采样"];
         }
     }
 
@@ -1800,15 +1817,21 @@
         for (BenchStreamResult *result in self.batchResults) {
             append(@"--- %@ ---", result.displayName);
             for (BenchRoundMetrics *r in result.rounds) {
-                append(@"  #%lu %@ %.4f ms/f  P95 %.4f  CPU %.1f%% (%.2f 核)  "
-                       @"基线 FP %.1f MB  峰值 FP %.1f MB  净 %.1f MB  RSS峰 %.1f MB  %@",
+                NSString *cpuText = r.cpuSampled
+                    ? [NSString stringWithFormat:@"CPU %.1f%% (%.2f 核, 峰 %.1f%%%@)",
+                       r.avgCPUPercent, r.avgCPUCores, r.peakCPUPercent,
+                       r.peakCPUSampled ? @"" : @", 峰为估算"]
+                    : @"CPU 无采样";
+                NSString *memText = r.memorySampled
+                    ? [NSString stringWithFormat:@"基线 FP %.1f MB  峰值 FP %.1f MB  净 %.1f MB  RSS峰 %.1f MB",
+                       r.baselineFootprintMB, r.peakFootprintMB, r.footprintDeltaMB,
+                       r.peakResidentMB]
+                    : @"内存 无采样";
+                append(@"  #%lu %@ %.4f ms/f  P95 %.4f  %@  %@  %@",
                        (unsigned long)r.index,
                        r.isWarmup ? @"[预热]" : @"[正式]",
                        r.avgFrameMs, r.p95FrameMs,
-                       r.avgCPUPercent, r.avgCPUCores,
-                       r.baselineFootprintMB, r.peakFootprintMB, r.footprintDeltaMB,
-                       r.peakResidentMB,
-                       r.resolutionDescription);
+                       cpuText, memText, r.resolutionDescription);
             }
         }
         for (NSString *failure in self.failedStreamNames) {
