@@ -187,27 +187,31 @@ xcodebuild -project TXAV1Dec.xcodeproj -scheme TXAV1Dec \
 
 界面上的「解码器版本（可多选）」与码流选择是同一套交互：点开弹出列表，勾选一个或多个版本。**版本列表直接来自 `DecoderSDK` 下的子目录名**，新增版本只需放一个目录并重新编译，界面自动多出一项，不需要改任何代码。
 
-目录名就是界面上显示的版本标识，目前有三项：
+目录名就是界面上显示的版本标识，目前有五项：
 
 ```
 TXAV1Dec/TXAV1Dec/DecoderSDK/
 ├── txav1d142/{include, lib/libtxav1d.a}
 ├── txav1d143/{include, lib/libtxav1d.a}
+├── dav1d150/{include, src, lib/libdav1d.a}
 ├── dav1d151/{include, src, lib/libdav1d.a}
+├── dav1d154/{include, src, lib/libdav1d.a}
 ├── Version.xcconfig            # 头文件与路径派生
 └── build_decoder_dylibs.sh     # 构建期把每个版本编成独立动态库
 ```
 
-目录名不必是三点式版本号。构建脚本会从头文件的 `TXAV1D_VERSION` / `DAV1D_VERSION` 宏取出真实版本串，再与目录名里的数字做压缩比对：`dav1d151` ↔ `"1.5.1"`、`txav1d143` ↔ `"1.4.3"` 都算一致。这样换库漏改目录名时仍会中止构建，而不会安静地跑错版本。
+目录名不必是三点式版本号。构建脚本会从头文件的 `TXAV1D_VERSION` / `DAV1D_VERSION` 宏取出真实版本串，再与目录名里的数字做压缩比对：`dav1d154` ↔ `"1.5.4"`、`txav1d143` ↔ `"1.4.3"` 都算一致。这样换库漏改目录名时仍会中止构建，而不会安静地跑错版本。
 
 ### 接入上游 dav1d
 
-`dav1d151` 来自 `/Users/rbyang/Documents/UGit/codec/dav1d`（上游 VideoLAN dav1d 1.5.1），它与 txav1d 有两个实质差异：
+`dav1d150` / `dav1d151` / `dav1d154` 分别是上游 VideoLAN dav1d 的 1.5.0、1.5.1、1.5.4，它与 txav1d 有两个实质差异：
 
 - **API 前缀不同**：上游是 `dav1d_` / `Dav1d`，txav1d 是 `txav1d_` / `Txav1d`。
 - **`Dav1dSettings` 没有 `use_wpp`**：那是 txav1d 的私有扩展，上游没有对应开关。
 
-工程没有为此复制一份 tools 源码，而是在 `dav1d151/include/txav1d/` 下放了一层名字映射头：共用源码原样编译，`txav1d_open`、`Txav1dPicture` 等由宏解析到 `dav1d_*` / `Dav1d*`。真正需要包装的只有 `txav1d_default_settings` 与 `txav1d_open` 两个（因为设置结构体多了 `use_wpp`，必须逐字段搬运），实现放在 `dav1d151/src/txav1d_shim.c`。
+这三个版本的 `Dav1dSettings` 字段与顺序完全相同，`DAV1D_API_VERSION` 都是 7.0.0，公开头文件差异只在内联注释格式，因此共用同一套兼容层，只有版本号不同。
+
+工程没有为此复制一份 tools 源码，而是在 `<版本>/include/txav1d/` 下放了一层名字映射头：共用源码原样编译，`txav1d_open`、`Txav1dPicture` 等由宏解析到 `dav1d_*` / `Dav1d*`。真正需要包装的只有 `txav1d_default_settings` 与 `txav1d_open` 两个（因为设置结构体多了 `use_wpp`，必须逐字段搬运），实现放在 `<版本>/src/txav1d_shim.c`。
 
 这样共用代码路径始终只有一份。若复制源码改名，将来每加一个解码器族都要再复制一次，迟早出现「改了一份漏了另一份」的静默错配。
 
