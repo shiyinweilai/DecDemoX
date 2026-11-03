@@ -59,6 +59,29 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) BenchSchedulePolicy schedulePolicy;
 
 /**
+ * 定速解码（pacing）。
+ *
+ * 对应解码库命令行里的 `--realtime`：按目标帧率对齐每帧的产出时刻，
+ * 用于模拟实时播放时的解码压力，而不是让解码器跑满算力。
+ *
+ * 它只是解码循环里的节流，不改变解码器任何内部参数，因此同一版本可以在
+ * 定速 / 不定速两种模式下反复对照，两边数据仍然可比。
+ */
+@property (nonatomic, assign) BOOL pacingEnabled;
+
+/**
+ * 是否按码流标称帧率定速。
+ *
+ * YES 时用码流头里的 fps 作为目标（对应 CLI 的 `--realtime`，不带参数）；
+ * NO 时用 pacingFPS 指定的帧率（对应 `--realtime $fract`）。码流头缺帧率时
+ * 按码流定速无法成立，会退回不定速，实际生效值以结果里的字段为准。
+ */
+@property (nonatomic, assign) BOOL pacingUseSourceFPS;
+
+/** 自定义目标帧率，仅在 pacingEnabled 且 !pacingUseSourceFPS 时有效 */
+@property (nonatomic, assign) double pacingFPS;
+
+/**
  * 被测解码器标识，例如 "av1d 1.4.1" / "新解码器 v2"。
  *
  * 横向对比的本质是「同一码流、同一参数，只换解码器」，所以结果必须带上
@@ -112,6 +135,28 @@ FOUNDATION_EXPORT NSString *BenchDecoderVersionDescription(void);
 @property (nonatomic, assign) double maxFrameMs;
 @property (nonatomic, assign) double p50FrameMs;
 @property (nonatomic, assign) double p95FrameMs;
+
+/**
+ * 实际生效的定速状态。
+ *
+ * 取自解码库回填的值而不是配置：选了「按码流帧率」但码流头缺帧率时会
+ * 静默退回不定速，只有看结果才知道这一轮到底有没有定速。
+ */
+@property (nonatomic, assign) BOOL pacingApplied;
+/** 实际目标帧率，未定速时为 0 */
+@property (nonatomic, assign) double pacingFPS;
+/** 本轮累计节流等待时长（毫秒），用于核对 totalMs 的构成 */
+@property (nonatomic, assign) double pacingWaitMs;
+
+/**
+ * 实际产帧率 = 解码帧数 / 端到端墙钟时长。
+ *
+ * 与 decodeFPS 的区别是本属性包含定速等待：定速 75fps 时它应趋近 75，
+ * 而 decodeFPS 反映的是解码器真实能力（通常远高于目标值）。
+ * 这是唯一能直接证明「定速是否真的生效」的指标，缺了它就只能靠
+ * decodeFPS 猜，而那个数字在定速与不定速下都可以很高，看不出区别。
+ */
+@property (nonatomic, readonly) double actualFPS;
 
 /** 解码帧率 = 1000 / avgFrameMs */
 @property (nonatomic, readonly) double decodeFPS;
@@ -238,6 +283,26 @@ FOUNDATION_EXPORT NSString *BenchDecoderVersionDescription(void);
  * 跑得最好的一次。汇总表按峰值展示时必须与 minAvgFrameMs 配对使用，
  * 否则同一行的 fps 与 ms/f 会来自不同轮次，互相矛盾。
  */
+/**
+ * 平均实际产帧率：各计分轮 actualFPS 的均值。
+ *
+ * 定速跑时它应接近 pacingFPS，这是判断定速是否生效的主要依据。
+ */
+@property (nonatomic, readonly) double actualFPS;
+
+/**
+ * 实际产帧率相对目标帧率的偏差百分比，未定速或缺少目标时返回 0。
+ *
+ * 定速生效时该值通常在小数点后，偏差明显（如超过 5%）说明目标帧率
+ * 高于这台设备的能力：解码器跑不到那么快，节流自然无从等待。
+ * 这个区分很重要——「定速 300fps 但实际只有 200」不代表定速失效，
+ * 而是设备算力不足，此时定速设置本身没有意义。
+ */
+@property (nonatomic, readonly) double pacingDeviationPercent;
+
+/** 各计分轮的目标帧率，取第一个真正生效的轮次；未定速返回 0 */
+@property (nonatomic, readonly) double pacingTargetFPS;
+
 @property (nonatomic, readonly) double peakDecodeFPS;
 
 @property (nonatomic, readonly) double speedRatio;

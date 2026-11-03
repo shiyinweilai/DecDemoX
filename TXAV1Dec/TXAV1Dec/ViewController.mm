@@ -190,6 +190,17 @@
 @property (nonatomic, strong) BenchSegmentRow *affinitySegment;
 
 /**
+ * 定速解码设置。
+ *
+ * 用「分段控件 + 一个帧率输入格」而不是只给一个输入框：定速有三种常见意图
+ * （不测、按码流原帧率、按指定帧率），前两种不需要填数字，把输入框始终
+ * 摆在那就得让用户猜「留空是什么意思」。分段控件把选择明确成一件事，
+ * 输入格只在选了自定义帧率时才可编辑。
+ */
+@property (nonatomic, strong) BenchSegmentRow *pacingSegment;
+@property (nonatomic, strong) BenchCompactField *pacingField;
+
+/**
  * 命令行指定的线程数，-1 表示未指定、按界面分段控件取值。
  *
  * 界面分段只提供 0/1/2/4/8 五档，但自测需要扫 3、6、12 这类非档位值
@@ -226,7 +237,7 @@
 /**
  * 指标矩阵：6 行主要指标 × N 列对象。
  *
- * 主要指标固定六项（fps、单帧耗时、CPU、波动、P95、净内存），
+ * 行序为 帧率、净内存、CPU、单帧耗时、波动、P95，行数恒定不随定速与否变化；
  * 被比较的对象数量不定（版本 × 码流的组合），因此指标做行、对象做列。
  * 这样加一个版本或多勾一个码流只是多一列，布局不用重排。
  */
@@ -525,8 +536,35 @@
     self.affinitySegment = [[BenchSegmentRow alloc] initWithTitle:@"核调度偏好"
                                                             items:@[@"不干预", @"性能核", @"能效核"]];
 
+    self.pacingSegment = [[BenchSegmentRow alloc] initWithTitle:@"定速解码"
+                                                          items:@[@"不测", @"码流帧率", @"指定帧率"]];
+    self.pacingField = [[BenchCompactField alloc] initWithCaption:@"目标帧率"
+                                                       unitSuffix:@"fps"
+                                                         keyboard:UIKeyboardTypeDecimalPad];
+    self.pacingField.textField.placeholder = @"如 30";
+    [self.pacingSegment.segmentedControl addTarget:self
+                                            action:@selector(pacingSegmentChanged)
+                                  forControlEvents:UIControlEventValueChanged];
+
+    // 帧率输入格放在横排里并限宽，不用垂直 Stack 直接铺：
+    // 紧凑输入格是「标题在上、输入框在下」的竖版结构，单放进垂直 Stack
+    // 会让输入框拉伸到整行宽（约 340pt），与上方四等分的窄格视觉不统一，
+    // 一个数字占满一整行也显得比它实际的重要性更重。
+    UIView *pacingSpacer = [[UIView alloc] init];
+    [pacingSpacer setContentHuggingPriority:UILayoutPriorityDefaultLow
+                                    forAxis:UILayoutConstraintAxisHorizontal];
+    [pacingSpacer setContentCompressionResistancePriority:UILayoutPriorityDefaultLow
+                                                  forAxis:UILayoutConstraintAxisHorizontal];
+    UIStackView *pacingRow = [[UIStackView alloc] initWithArrangedSubviews:@[
+        self.pacingField, pacingSpacer
+    ]];
+    pacingRow.axis = UILayoutConstraintAxisHorizontal;
+    pacingRow.alignment = UIStackViewAlignmentTop;
+    [self.pacingField.widthAnchor constraintEqualToConstant:120].active = YES;
+
     UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[
-        targetBlock, numbersRow, self.threadSegment, self.affinitySegment
+        targetBlock, numbersRow, self.threadSegment, self.affinitySegment,
+        self.pacingSegment, pacingRow
     ]];
     stack.axis = UILayoutConstraintAxisVertical;
     stack.spacing = 12;
@@ -535,7 +573,8 @@
     [self pinEdgesOfView:stack toView:card.contentView];
 
     for (BenchCompactField *field in @[self.framesField, self.roundsField,
-                                       self.warmupField, self.skipField]) {
+                                       self.warmupField, self.skipField,
+                                       self.pacingField]) {
         field.textField.delegate = self;
     }
 
@@ -551,6 +590,11 @@
     self.warmupField.textField.text = [NSString stringWithFormat:@"%lu",
                                        (unsigned long)defaults.warmupRounds];
     self.skipField.textField.text = @"0";
+    // 定速默认关闭：测速目标是找性能上限，默认限帧会让各版本都收敛到目标帧率。
+    // 自定义帧率的输入框给个常见值，切换到「指定帧率」时不用先想填什么。
+    self.pacingSegment.segmentedControl.selectedSegmentIndex = 0;
+    self.pacingField.textField.text = @"30";
+    [self refreshPacingFieldAvailability];
     [self reloadDecoders];
 }
 
@@ -1051,6 +1095,21 @@
         config.threads = [self threadCountFromSegment];
     }
     config.schedulePolicy = [self schedulePolicyFromSegment];
+    // 定速设置：分段控件第 0 项是「不定速」，1 是「按码流帧率」，
+    // 2 是「自定义帧率」。自定义模式下输入框留空或非正数视为关闭，
+    // 否则会传一个 0 fps 给库，那等于每帧都等无限久。
+    NSInteger pacingIndex = self.pacingSegment.segmentedControl.selectedSegmentIndex;
+    if (pacingIndex == 1) {
+        config.pacingEnabled = YES;
+        config.pacingUseSourceFPS = YES;
+    } else if (pacingIndex == 2) {
+        double fps = self.pacingField.textField.text.doubleValue;
+        config.pacingEnabled = fps > 0;
+        config.pacingUseSourceFPS = NO;
+        config.pacingFPS = fps;
+    } else {
+        config.pacingEnabled = NO;
+    }
     // 解码器实例与展示名一起绑定：名称取自实际加载的那个库，
     // 而不是用户填的文本，杜绝"跑 A 标 B"。
     config.decoder = decoder;
@@ -1080,6 +1139,93 @@
         case 2: return BenchSchedulePolicyEfficiency;
         default: return BenchSchedulePolicyDefault;
     }
+}
+
+- (void)pacingSegmentChanged {
+    [self refreshPacingFieldAvailability];
+}
+
+- (void)refreshPacingFieldAvailability {
+    [self refreshPacingFieldAvailabilityWithRunning:self.engine.isRunning];
+}
+
+/**
+ * 只在「指定帧率」档下开放帧率输入框。
+ *
+ * 另外两档把帧率框置灰而不是隐藏：隐藏会让表单高度随选择跳动，
+ * 布局在点选瞬间整体位移；置灰能同时表达「现在不生效」和「它存在」。
+ *
+ * 运行中也要禁用：批量测试会把同一份输入反复用于每个组合，
+ * 中途改帧率只会让前后组合口径不一致。
+ *
+ * running 由调用方显式传入而不是内部读 engine.isRunning：
+ * setRunningUI: 在引擎状态切换的前后都可能被调用，读属性会碰上时序差，
+ * 表现为刚开跑时帧率框仍可编辑。
+ */
+- (void)refreshPacingFieldAvailabilityWithRunning:(BOOL)running {
+    const BOOL custom = self.pacingSegment.segmentedControl.selectedSegmentIndex == 2;
+    self.pacingField.textField.enabled = custom && !running;
+    self.pacingField.alpha = custom ? 1.0 : 0.4;
+}
+
+/**
+ * 定速设置的展示文本，用于结果图例与导出配置。
+ *
+ * 未定速返回 nil，让调用方决定是省略这段还是显示「不定速」。
+ */
+- (nullable NSString *)pacingDescriptionForConfig:(BenchRunConfig *)config {
+    if (!config.pacingEnabled) return nil;
+    if (config.pacingUseSourceFPS) return @"码流帧率";
+    return [NSString stringWithFormat:@"%.0f fps", config.pacingFPS];
+}
+
+/**
+ * 结果区图例里的定速说明，未启用定速时返回 nil。
+ *
+ * 必须解释清楚「定速值 ≠ 显示的 fps」：定速限制的是产帧节奏，
+ * 而 fps 是从解码耗时换算的，两者天然不同量级。不说明的话，
+ * 定速 30fps 却看到 fps 三百多会被当成 bug。
+ */
+- (nullable NSString *)pacingLegendNote {
+    BenchRunConfig *cfg = self.batchResults.firstObject.config;
+    if (!cfg.pacingEnabled) return nil;
+
+    // 用实际生效值而不是配置值：选了按码流帧率但码流头缺帧率时会退回不定速，
+    // 此时若照抄配置写「已定速」，等于在报告里编造一个没发生的条件。
+    BOOL applied = NO;
+    double fps = 0;
+    for (BenchStreamResult *r in self.batchResults) {
+        if (r.rounds.count == 0) continue;
+        BenchRoundMetrics *first = r.rounds.firstObject;
+        if (first.pacingApplied) {
+            applied = YES;
+            fps = first.pacingFPS;
+            break;
+        }
+    }
+    if (!applied) {
+        return @"定速：所选模式未生效（码流头缺帧率或目标帧率无效），本轮按不定速执行。";
+    }
+    // 用实测的实际帧率来说明，而不是只讲原理：用户真正想知道的是
+    // 「我填的 75 到底有没有被遵守」，直接把数字摆出来最直接。
+    double actual = 0;
+    for (BenchStreamResult *r in self.batchResults) {
+        if (r.summary.pacingTargetFPS > 0) {
+            actual = r.summary.actualFPS;
+            break;
+        }
+    }
+    double deviation = fps > 0 ? (actual - fps) / fps * 100.0 : 0;
+    return [NSString stringWithFormat:
+        @"定速：按 %.0f fps 对齐产帧节奏（相当于 --realtime）。\n"
+        @"帧率行显示的是实测产帧速率 %.1f fps，相对目标 %+.1f%%。"
+        @"它贴着目标值就说明节流在生效；偏差主要来自首帧尚未进入节拍、"
+        @"以及每轮收尾的取整。\n"
+        @"单帧耗时 ms 已剔除节流等待，衡量的是解码器本身处理一帧要多久，"
+        @"所以它明显小于一个目标帧间隔（%.1f ms）是正常的——两者不是同一个量。\n"
+        @"CPU 列是整轮平均占用，定速时大部分时间在睡眠等待，数值会明显低于不定速的结果"
+        @"（节流等待时长见下方信息）。定速与不定速两组数据不要直接对比 CPU 高低。",
+        fps, actual, deviation, fps > 0 ? 1000.0 / fps : 0];
 }
 
 - (void)finishBatch {
@@ -1116,11 +1262,17 @@
     }
 
     for (BenchCompactField *field in @[self.framesField, self.roundsField,
-                                       self.warmupField, self.skipField]) {
+                                       self.warmupField, self.skipField,
+                                       self.pacingField]) {
         field.textField.enabled = !running;
     }
     self.threadSegment.segmentedControl.enabled = !running;
     self.affinitySegment.segmentedControl.enabled = !running;
+    self.pacingSegment.segmentedControl.enabled = !running;
+    // 帧率框还受「指定帧率」档位约束，交给同一个方法统一判断，
+    // 避免两处写死可编辑条件后不同步。这里传入本次的 running 而不是读
+    // engine.isRunning：后者在开跑瞬间可能还没更新，会让框短暂可编辑。
+    [self refreshPacingFieldAvailabilityWithRunning:running];
     self.decoderPickerRow.button.enabled = !running;
     self.streamPickerRow.button.enabled = !running;
     self.reportCopyButton.enabled = !running && self.reportText.length > 0;
@@ -1233,6 +1385,15 @@
     NSMutableArray<NSString *> *p95 = [NSMutableArray array];
     NSMutableArray<NSString *> *memory = [NSMutableArray array];
 
+    // 定速是否生效，决定「帧率」这一格取什么口径：
+    // 定速时它就是实际产帧速率（应当固定在目标值附近，这正是用户要看的数），
+    // 不定速时才取解码峰值帧率。两者不并列显示——定速场景下再摆一个
+    // 上万的上限数字，只会让人怀疑定速没生效。
+    BOOL anyPacing = NO;
+    for (BenchStreamResult *result in self.batchResults) {
+        if (result.summary.pacingTargetFPS > 0) { anyPacing = YES; break; }
+    }
+
     // 列头只放版本：同一轮测试的码流与参数是对齐的，码流名对每一列都一样，
     // 重复 N 遍既不提供信息，还要占掉列头一半宽度、把版本名挤小。
     // 多码流时同一版本会出现多列，此时只追加序号区分（1.4.3 / 1.4.3 #2），
@@ -1259,10 +1420,17 @@
             }
             continue;
         }
-        // fps 与 ms/f 必须同源：两者互为倒数，若 fps 取最快轮、ms 取各轮均值，
-        // 同一行会出现「fps 变高但单帧耗时也变长」这种自相矛盾的组合。
-        // 这里都取最快的一轮（轮内均帧耗时最小），即峰值口径。
-        [fps addObject:[NSString stringWithFormat:@"%.1f", s.peakDecodeFPS]];
+        // 帧率一格只放一个数：
+        // 定速时放实测产帧率，并带相对目标的偏差——定速场景下「有没有按
+        // 75 走」才是要看的，而不是解码器还能跑多快。
+        // 不定速时放峰值帧率，与单帧耗时互为倒数、同源可比（都取最快的一轮），
+        // 避免出现「fps 变高但单帧耗时也变长」这种自相矛盾的组合。
+        if (s.pacingTargetFPS > 0) {
+            [fps addObject:[NSString stringWithFormat:@"%.1f (%.1f%%)",
+                            s.actualFPS, s.pacingDeviationPercent]];
+        } else {
+            [fps addObject:[NSString stringWithFormat:@"%.1f", s.peakDecodeFPS]];
+        }
         [mspf addObject:[NSString stringWithFormat:@"%.2f", s.minAvgFrameMs]];
         // CPU 用整机占比，与报告同口径。两位小数：6 核机上整机占比
         // 一位小数只有 0.6% 单核的精度，两档实现并列时常显示成同一个数。
@@ -1276,24 +1444,42 @@
             ? [NSString stringWithFormat:@"%.1f", s.footprintDeltaMB] : @"--"];
     }
 
-    // 行序即判读顺序：快不快 → 贵不贵 → 稳不稳。
-    // 净内存提到第 4 行，波动与 P95 落到第 5、6 行：
-    // 前四个是每次挑选版本都必看的量，波动和 P95 用于进一步挑刺，
-    // 放在尾部既不打断主线，又能固定占据最后两行便于纵向扫视。
+    // 行序固定为：帧率 → 内存 → CPU → 单帧耗时 → 波动 → P95。
+    // 前三个是挑版本时最先看的量（跑得对不对、占不占资源），
+    // 单帧耗时、波动、P95 是进一步挑刺用的稳定性指标，放在后面。
+    // 行数恒定 6 行：定速与否只改变帧率那一格的取值口径，不再增减行数，
+    // 免得表格高度随配置变化、也免得同一份报告两种行序不好对照。
+    NSArray<NSString *> *rowTitles = @[@"帧率 fps", @"净内存 MB", @"CPU 整机",
+                                       @"单帧耗时 ms", @"波动", @"P95 ms"];
+    NSArray<NSArray *> *rowValues = @[fps, memory, cpu, mspf, jitter, p95];
     [self.matrixView reloadWithHeaders:headers
-                             rowTitles:@[@"峰值帧率 fps", @"单帧耗时 ms", @"CPU 整机",
-                                         @"净内存 MB", @"波动", @"P95 ms"]
-                                values:@[fps, mspf, cpu, memory, jitter, p95]
+                             rowTitles:rowTitles
+                                values:rowValues
                          emphasizedRow:0];
 
     self.metricLegendLabel.text =
-        @"fps 与单帧耗时取最快的一轮（峰值口径），两者互为倒数、同源可比；整体均值见复制出的 JSON。\n"
+        anyPacing
+            ? @"帧率 = 本轮实测产帧速率（受定速节流约束），括号内为相对目标帧率的偏差；"
+               @"整体均值见复制出的 JSON。\n"
+            : @"帧率与单帧耗时取最快的一轮（峰值口径），两者互为倒数、同源可比；"
+               @"整体均值见复制出的 JSON。\n";
+    self.metricLegendLabel.text = [self.metricLegendLabel.text
+        stringByAppendingString:
         @"波动 = 轮间标准差 ÷ 均值。反复跑同一版本时每轮结果的离散程度，反映测试是否稳定；"
         @"它不是帧与帧之间的抖动。有效轮次不足 2 轮时为 0.00%，只说明样本不够，不代表稳定。\n"
         @"P95 = 最后一轮内全部帧耗时排序后的第 95 百分位，即 95% 的帧不慢于该值。"
         @"它反映帧间抖动，平均值被大量正常帧摊平后看不出偶发长帧，P95 能暴露出来。\n"
         @"显示 -- 表示该轮没有采到有效样本（通常是帧数太少、单轮时长过短），"
-        @"不等于占用为 0；此时应提高每轮帧数后重测。";
+        @"不等于占用为 0；此时应提高每轮帧数后重测。"];
+
+    // 定速只在开启时需要额外说明：它改变的是产帧节奏，单帧耗时与 fps
+    // 已经排除了节流等待，看到「定速 30fps 但 fps 显示 300」不是矛盾，
+    // 而是这两个指标衡量的是解码能力，不是实际播放帧率。
+    NSString *pacingNote = [self pacingLegendNote];
+    if (pacingNote.length > 0) {
+        self.metricLegendLabel.text = [self.metricLegendLabel.text
+            stringByAppendingFormat:@"\n%@", pacingNote];
+    }
 
     self.secondaryLabel.text = [self buildSecondaryInfoText];
 }
@@ -1362,6 +1548,15 @@
             [lines addObject:[NSString stringWithFormat:
                 @"  峰值线程 %ld · resident 峰 %.0f MB",
                 (long)last.peakThreadCount, s.peakResidentMB]];
+        }
+        // 定速只在真生效时补一行：未定速是常态，每段都写「不定速」只会稀释信息。
+        // 写在轮次信息之后，因为它是「这批数字在什么条件下跑出来的」的注脚。
+        if (last.pacingApplied) {
+            [lines addObject:[NSString stringWithFormat:
+                @"  定速 %.0f fps · 实测 %.1f fps · 节流等待累计 %.0f ms（已从单帧耗时中剔除）",
+                last.pacingFPS, last.actualFPS, last.pacingWaitMs]];
+        } else if (result.config.pacingEnabled) {
+            [lines addObject:@"  定速未生效（码流头缺帧率或目标帧率无效），按不定速执行"];
         }
 
         [blocks addObject:[lines componentsJoinedByString:@"\n"]];
@@ -1467,6 +1662,16 @@ static id BenchJSONString(NSString *value) {
         [BenchSystemMetrics schedulePolicyName:cfg.schedulePolicy]);
     config[@"schedule_policy_note"] = BenchJSONString(
         [BenchSystemMetrics schedulePolicyNote:cfg.schedulePolicy]);
+    // 定速是三态（关闭/码流帧率/指定帧率），只写一个布尔会让下游分不清
+    // 「按码流」和「指定 30fps」这两种完全不同的测试条件。
+    NSString *pacingDescription = [self pacingDescriptionForConfig:cfg];
+    config[@"pacing_mode"] = cfg.pacingEnabled
+        ? BenchJSONString(cfg.pacingUseSourceFPS ? @"source_fps" : @"custom_fps")
+        : BenchJSONString(@"off");
+    config[@"pacing_target_fps"] = (!cfg.pacingEnabled || cfg.pacingUseSourceFPS)
+        ? [NSNull null] : BenchJSONNumber(cfg.pacingFPS, 3);
+    config[@"pacing_description"] = pacingDescription
+        ? BenchJSONString(pacingDescription) : [NSNull null];
     root[@"config"] = config;
 
     NSMutableArray *decoders = [NSMutableArray array];
@@ -1528,6 +1733,39 @@ static id BenchJSONString(NSString *value) {
         summary[@"cpu_peak_cores"] = s.peakCPUSampled
             ? BenchJSONNumber(s.peakCPUCores, 3) : [NSNull null];
 
+        // 定速信息聚合到 summary：下游拿到一条组合的汇总时，必须知道它是在
+        // 什么节奏下跑出来的。按码流帧率时不同码流目标不同，所以同时给出
+        // 生效状态与目标值，而不是只给一个布尔。
+        BOOL pacingApplied = NO;
+        double pacingFPS = 0;
+        double pacingWaitTotal = 0;
+        for (BenchRoundMetrics *r in s.scoredRounds) {
+            pacingWaitTotal += r.pacingWaitMs;
+            if (r.pacingApplied) {
+                pacingApplied = YES;
+                pacingFPS = r.pacingFPS;
+            }
+        }
+        summary[@"pacing_applied"] = @(pacingApplied);
+        summary[@"pacing_target_fps"] = pacingApplied
+            ? BenchJSONNumber(pacingFPS, 3) : [NSNull null];
+        summary[@"pacing_wait_ms_total"] = pacingApplied
+            ? BenchJSONNumber(pacingWaitTotal, 3) : [NSNull null];
+        // 实际产帧率是判断定速是否生效的唯一直接证据：它包含节流等待，
+        // 定速 75 时应贴着 75，而不像 fps_peak 那样动辄数百。
+        summary[@"fps_actual"] = pacingApplied
+            ? BenchJSONNumber(s.actualFPS, 3) : [NSNull null];
+        summary[@"pacing_deviation_percent"] = pacingApplied
+            ? BenchJSONNumber(s.pacingDeviationPercent, 3) : [NSNull null];
+        // 定速时 CPU 是整轮平均，睡眠等待一并摊进分母，所以它衡量的是
+        // 「播放时的平均占用」而不是「解码时的占用」。不标注的话，
+        // 下游会拿定速的 CPU 去和不定速的比，得出「开了定速更省」的错误结论。
+        if (pacingApplied) {
+            summary[@"cpu_note"] = BenchJSONString(
+                @"CPU 与 cpu_seconds_per_frame 为整轮平均，含定速睡眠等待，"
+                @"仅可与同样定速的结果对比");
+        }
+
         const BOOL memorySampled = s.memorySampled;
         summary[@"memory_sampled"] = @(memorySampled);
         summary[@"footprint_delta_mb"] = memorySampled
@@ -1576,6 +1814,14 @@ static id BenchJSONString(NSString *value) {
                 round[@"demux_ms"] = BenchJSONNumber(r.demuxMs, 3);
                 round[@"decode_ms"] = BenchJSONNumber(r.decodeMs, 3);
                 round[@"first_frame_ms"] = BenchJSONNumber(r.firstFrameMs, 3);
+                // 定速按轮写：同一批次里不同码流的帧率不同，「按码流帧率」
+                // 实际对齐的目标也就不同，聚合到顶层会丢掉这个信息。
+                round[@"pacing_applied"] = @(r.pacingApplied);
+                round[@"pacing_target_fps"] = r.pacingApplied
+                    ? BenchJSONNumber(r.pacingFPS, 3) : [NSNull null];
+                round[@"pacing_wait_ms"] = r.pacingApplied
+                    ? BenchJSONNumber(r.pacingWaitMs, 3) : [NSNull null];
+                round[@"fps_actual"] = BenchJSONNumber(r.actualFPS, 3);
                 round[@"peak_thread_count"] =
                     BenchJSONInteger((NSUInteger)MAX(r.peakThreadCount, 0));
                 // 区间墙钟与 CPU 时长仅用于诊断：二者之比即 cpu_percent，
@@ -1820,6 +2066,8 @@ static id BenchJSONString(NSString *value) {
     NSArray<NSString *> *args = [NSProcessInfo processInfo].arguments;
     NSUInteger framesIndex = [args indexOfObject:@"--frames"];
     NSUInteger threadsIndex = [args indexOfObject:@"--threads"];
+    NSUInteger pacingIndex = [args indexOfObject:@"--pacing"];
+    NSUInteger pacingFPSIndex = [args indexOfObject:@"--pacing-fps"];
     NSUInteger policyIndex = [args indexOfObject:@"--policy"];
     NSUInteger roundsIndex = [args indexOfObject:@"--rounds"];
 
@@ -1865,6 +2113,20 @@ static id BenchJSONString(NSString *value) {
             self.affinitySegment.segmentedControl.selectedSegmentIndex = policy;
         }
     }
+    // 定速参数：--pacing 取 0/1/2（不测/码流帧率/指定帧率），
+    // --pacing-fps 仅在第 2 档生效。走界面控件而不是直接改 config，
+    // 这样自测同时也验证了「界面选择 → 配置」这段映射是否正确。
+    self.pacingSegment.segmentedControl.selectedSegmentIndex = 0;
+    if (pacingIndex != NSNotFound && pacingIndex + 1 < args.count) {
+        NSInteger pacingMode = [args[pacingIndex + 1] integerValue];
+        if (pacingMode >= 0 && pacingMode <= 2) {
+            self.pacingSegment.segmentedControl.selectedSegmentIndex = pacingMode;
+        }
+    }
+    if (pacingFPSIndex != NSNotFound && pacingFPSIndex + 1 < args.count) {
+        self.pacingField.textField.text = args[pacingFPSIndex + 1];
+    }
+    [self refreshPacingFieldAvailabilityWithRunning:NO];
 
     append(@"调度策略：%@", [BenchSystemMetrics schedulePolicyName:[self schedulePolicyFromSegment]]);
     // 0 是「自动」而不是「指定 0 个线程」：配置层把 0 解释为让库按核心数取满。
@@ -1878,6 +2140,14 @@ static id BenchJSONString(NSString *value) {
         append(@"线程数：%ld（界面选择）", (long)effectiveThreads);
     } else {
         append(@"线程数：自动（界面选择，按逻辑核数取满）");
+    }
+    NSInteger pacingMode = self.pacingSegment.segmentedControl.selectedSegmentIndex;
+    if (pacingMode == 2) {
+        append(@"定速：指定 %@ fps（界面选择）", self.pacingField.textField.text);
+    } else if (pacingMode == 1) {
+        append(@"定速：按码流帧率（界面选择）");
+    } else {
+        append(@"定速：不测（不定速）");
     }
     append(@"开始批量测试：%lu 个码流", (unsigned long)self.batchTotal);
 
@@ -1918,11 +2188,15 @@ static id BenchJSONString(NSString *value) {
                        r.baselineFootprintMB, r.peakFootprintMB, r.footprintDeltaMB,
                        r.peakResidentMB]
                     : @"内存 无采样";
-                append(@"  #%lu %@ %.4f ms/f  P95 %.4f  %@  %@  %@",
+                append(@"  #%lu %@ %.4f ms/f  P95 %.4f  实际 %.1f fps  %@  %@  %@",
                        (unsigned long)r.index,
                        r.isWarmup ? @"[预热]" : @"[正式]",
-                       r.avgFrameMs, r.p95FrameMs,
+                       r.avgFrameMs, r.p95FrameMs, r.actualFPS,
                        cpuText, memText, r.resolutionDescription);
+                if (r.pacingApplied) {
+                    append(@"      定速 %.1f fps  节流等待 %.1f ms  @%.1f fps",
+                           r.pacingFPS, r.pacingWaitMs, r.actualFPS);
+                }
             }
         }
         for (NSString *failure in self.failedStreamNames) {

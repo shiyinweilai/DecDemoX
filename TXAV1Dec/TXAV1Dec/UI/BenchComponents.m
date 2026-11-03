@@ -493,6 +493,16 @@
 @property (nonatomic, strong) UIScrollView *scrollView;
 @property (nonatomic, strong) UIStackView *contentStack;
 @property (nonatomic, strong) NSLayoutConstraint *contentWidthConstraint;
+/**
+ * 滚动区与行名列的高度约束。
+ *
+ * 行数不是固定的：不定速时 6 行，定速时多出一行「实际帧率」变成 7 行
+ * （将来也可能再加）。高度若写死成 6 行，多出的行会被裁在视图外，
+ * 表现为行名与数值整体错开一行——看起来像数据错位，实际是布局溢出。
+ * 因此保留约束引用，在 reload 时按实际行数更新常量。
+ */
+@property (nonatomic, strong) NSLayoutConstraint *scrollHeightConstraint;
+@property (nonatomic, strong) NSLayoutConstraint *titleColumnHeightConstraint;
 @property (nonatomic, assign) NSUInteger columnCount;
 @property (nonatomic, assign) NSInteger emphasizedRow;
 @property (nonatomic, assign) CGFloat lastLayoutWidth;
@@ -513,6 +523,15 @@ static const CGFloat kMinColumnWidth = 74.0;
 
 static const CGFloat kHeaderHeight = 46.0;
 static const CGFloat kRowHeight = 40.0;
+/// 行间分隔线高度。左右两侧都要各自插入等高占位，否则分隔线会把
+/// 后续行整体下推，行名与数值越往下错开越多。
+static const CGFloat kSeparatorHeight = 0.5;
+
+/// 矩阵总高度：表头 + 各行 + 行间分隔线
+static CGFloat BenchMatrixHeight(NSUInteger rows) {
+    if (rows == 0) return kHeaderHeight;
+    return kHeaderHeight + kRowHeight * rows + kSeparatorHeight * (rows - 1);
+}
 
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
@@ -549,16 +568,19 @@ static const CGFloat kRowHeight = 40.0;
         constraintEqualToAnchor:_scrollView.frameLayoutGuide.widthAnchor
                        constant:0];
 
+    _scrollHeightConstraint = [_scrollView.heightAnchor constraintEqualToConstant:
+        kHeaderHeight + kRowHeight * 6];
+    _titleColumnHeightConstraint = [_titleColumn.heightAnchor constraintEqualToConstant:
+        kHeaderHeight + kRowHeight * 6];
+
     [NSLayoutConstraint activateConstraints:@[
         [_contentStack.topAnchor constraintEqualToAnchor:[contentGuide topAnchor]],
         [_contentStack.leadingAnchor constraintEqualToAnchor:[contentGuide leadingAnchor]],
         [_contentStack.trailingAnchor constraintEqualToAnchor:[contentGuide trailingAnchor]],
         [_contentStack.bottomAnchor constraintEqualToAnchor:[contentGuide bottomAnchor]],
         _contentWidthConstraint,
-        [_scrollView.heightAnchor constraintEqualToConstant:
-            kHeaderHeight + kRowHeight * 6],
-        [_titleColumn.heightAnchor constraintEqualToConstant:
-            kHeaderHeight + kRowHeight * 6],
+        _scrollHeightConstraint,
+        _titleColumnHeightConstraint,
     ]];
 
     [self addSubview:_titleColumn];
@@ -621,6 +643,14 @@ static const CGFloat kRowHeight = 40.0;
             [label.centerYAnchor constraintEqualToAnchor:holder.centerYAnchor],
         ]];
         [self.titleColumn addArrangedSubview:holder];
+
+        // 与右侧对齐：右侧每两行之间插了一条 0.5pt 分隔线，左侧若不留等高空位，
+        // 从第二行起行名会比数值高一点点，行数越多错得越明显。
+        if (title != rowTitles.lastObject) {
+            UIView *spacer = [[UIView alloc] init];
+            [spacer.heightAnchor constraintEqualToConstant:kSeparatorHeight].active = YES;
+            [self.titleColumn addArrangedSubview:spacer];
+        }
     }
 }
 
@@ -636,6 +666,12 @@ static const CGFloat kRowHeight = 40.0;
     self.columnCount = headers.count;
     self.emphasizedRow = emphasizedRow;
     [self rebuildTitleColumnWithRowTitles:rowTitles];
+
+    // 高度必须跟着行数走。之前固定 6 行，定速时多出「实际帧率」一行，
+    // 内容超出容器被裁掉，视觉上就是行名与数值整体错开一行。
+    const CGFloat matrixHeight = BenchMatrixHeight(rowTitles.count);
+    self.scrollHeightConstraint.constant = matrixHeight;
+    self.titleColumnHeightConstraint.constant = matrixHeight;
 
     // 表头行：每个对象一列。用两行显示（版本 + 码流）而不是单行拼接，
     // 因为多版本多码流时单行会很长，等分到窄列里必然被截断，
@@ -686,7 +722,7 @@ static const CGFloat kRowHeight = 40.0;
         if (row + 1 < rowTitles.count) {
             UIView *separator = [[UIView alloc] init];
             separator.backgroundColor = [BenchTheme separator];
-            [separator.heightAnchor constraintEqualToConstant:0.5].active = YES;
+            [separator.heightAnchor constraintEqualToConstant:kSeparatorHeight].active = YES;
             [self.contentStack addArrangedSubview:separator];
         }
     }

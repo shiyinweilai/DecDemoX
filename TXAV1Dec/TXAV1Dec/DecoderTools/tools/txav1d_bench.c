@@ -60,6 +60,22 @@ static double nanos_to_ms(const uint64_t nanos) {
 }
 
 /**
+ * 阻塞指定纳秒，专用于定速节流。
+ *
+ * 被打断时不重试剩余时间：节流的基准是「第 n 帧的绝对应产出时刻」，
+ * 少睡的那点时间会在下一次计算 deadline 时自动补回来，
+ * 局部重试反而会让累计误差越滚越大。
+ */
+static void bench_sleep_nanos(const uint64_t nanos) {
+    if (nanos == 0) return;
+    struct timespec ts = {
+        .tv_sec = (time_t)(nanos / 1000000000ULL),
+        .tv_nsec = (long)(nanos % 1000000000ULL),
+    };
+    nanosleep(&ts, NULL);
+}
+
+/**
  * 本机逻辑核数。与两个解码库内部 num_logical_processors() 在 Apple 平台
  * 的实现保持同一口径（hw.logicalcpu），保证「自动」档两边拿到相同的数。
  * 取不到时返回 0，由调用方退化为单线程。
@@ -147,6 +163,34 @@ int txav1d_bench(const Txav1dBenchConfig *const cfg,
     result->total_frames = total;
     result->fps_num = fps[0];
     result->fps_den = fps[1];
+
+    // ---- 定速（pacing）参数 ----
+    // 语义对齐命令行 txav1d 的 `--realtime`：按目标帧率对齐每帧的产出时刻。
+    // 它是「节流」而非解码器配置，不改变任何内部设置，只在我们自己的解码
+    // 循环里插入等待，因此可以安全地在同一个 dylib 上反复开关做对照。
+    int pacing = TXAV1D_BENCH_PACING_OFF;
+    double pacingFps = 0;
+    if (cfg->pacing == TXAV1D_BENCH_PACING_CUSTOM && cfg->pacing_fps > 0) {
+        pacing = TXAV1D_BENCH_PACING_CUSTOM;
+        pacingFps = cfg->pacing_fps;
+    } else if (cfg->pacing == TXAV1D_BENCH_PACING_SOURCE &&
+               fps[0] != 0 && fps[1] != 0) {
+        pacing = TXAV1D_BENCH_PACING_SOURCE;
+        pacingFps = (double)fps[0] / (double)fps[1];
+    }
+    // 码流头缺帧率时（fps[1]==0）「按码流帧率」无法成立，退回不定速。
+    // 这个决定必须回填到 result：只看传入的配置，下游会以为这组数据是定速跑的。
+    uint64_t pacingNspf = 0;
+    if (pacing != TXAV1D_BENCH_PACING_OFF) {
+        pacingNspf = (uint64_t)(1000000000.0 / pacingFps);
+        if (pacingNspf == 0) {
+            // 目标帧率高到不足 1 纳秒一帧，节流没有意义，按不定速处理
+            pacing = TXAV1D_BENCH_PACING_OFF;
+            pacingFps = 0;
+        }
+    }
+    result->pacing = pacing;
+    result->pacing_fps = pacingFps;
 
     Txav1dSettings settings;
     txav1d_default_settings(&settings);
@@ -242,6 +286,7 @@ int txav1d_bench(const Txav1dBenchConfig *const cfg,
     }
 
     uint64_t decodeNanos = 0;
+    uint64_t pacingWaitNanos = 0;
     unsigned decoded = 0;
     int openedOutput = 0;
     const uint64_t tStart = bench_now_nanos();
@@ -357,6 +402,24 @@ int txav1d_bench(const Txav1dBenchConfig *const cfg,
                 break;
             }
 
+            // ---- 定速节流 ----
+            // 以「第 n 帧的绝对应产出时刻」为基准等待，而不是每帧固定 sleep
+            // 一帧时长：解码本身有快有慢，逐帧固定等待会把偏差累加成漂移，
+            // 跑几千帧后实际帧率会明显偏离目标。
+            if (pacingNspf != 0) {
+                const uint64_t deadline = pacingNspf * (uint64_t)decoded;
+                const uint64_t elapsedAfter = bench_now_nanos() - tStart;
+                if (elapsedAfter < deadline) {
+                    const uint64_t waitStart = bench_now_nanos();
+                    bench_sleep_nanos(deadline - elapsedAfter);
+                    pacingWaitNanos += bench_now_nanos() - waitStart;
+                }
+                // 把节流等待排除出单帧耗时：lastFrameNanos 推到等待结束之后，
+                // 下一帧的间隔里就不含这段空转。否则定速下的 ms/f 会恰好等于
+                // 目标帧间隔，得到「解码速度和目标帧率完全一致」的假象。
+                lastFrameNanos = bench_now_nanos();
+            }
+
             if (cfg->limit > 0 && decoded >= cfg->limit) break;
         }
     }
@@ -392,6 +455,21 @@ int txav1d_bench(const Txav1dBenchConfig *const cfg,
             decoded++;
 
             if (output_write(out, &pic) < 0) break;
+
+            // 冲刷阶段的帧同样受定速约束：这些帧在 CLI 里也走同一个
+            // synchronize()，若这里跳过，长尾帧会在最后瞬间倾泻出来，
+            // 实际平均帧率高于目标值。
+            if (pacingNspf != 0) {
+                const uint64_t deadline = pacingNspf * (uint64_t)decoded;
+                const uint64_t elapsedAfter = bench_now_nanos() - tStart;
+                if (elapsedAfter < deadline) {
+                    const uint64_t waitStart = bench_now_nanos();
+                    bench_sleep_nanos(deadline - elapsedAfter);
+                    pacingWaitNanos += bench_now_nanos() - waitStart;
+                }
+                lastFrameNanos = bench_now_nanos();
+            }
+
             if (cfg->limit > 0 && decoded >= cfg->limit) break;
         }
     }
@@ -408,6 +486,7 @@ int txav1d_bench(const Txav1dBenchConfig *const cfg,
     result->demux_ms = nanos_to_ms(demuxNanos);
     result->decode_ms = nanos_to_ms(decodeNanos);
     result->total_ms = nanos_to_ms(totalNanos);
+    result->pacing_wait_ms = nanos_to_ms(pacingWaitNanos);
     if (decoded > 0) result->first_frame_ms = frameMs[0];
 
     if (decoded > 0) {

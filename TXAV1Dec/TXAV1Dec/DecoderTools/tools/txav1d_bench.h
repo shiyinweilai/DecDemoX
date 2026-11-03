@@ -23,6 +23,17 @@ extern "C" {
 /** txav1d_bench() 的失败返回码 */
 #define TXAV1D_BENCH_ERROR (-1)
 
+/**
+ * 定速（pacing）模式。
+ *
+ * 对应命令行 txav1d 的 `--realtime` 参数：按目标帧率对齐每帧的产出时刻，
+ * 用来模拟实时播放时的解码压力。它不改变解码器任何内部配置，
+ * 只是在本函数的解码循环里对产帧节奏做节流。
+ */
+#define TXAV1D_BENCH_PACING_OFF    0  ///< 不定速，全速解码（默认）
+#define TXAV1D_BENCH_PACING_SOURCE 1  ///< 按码流标称帧率对齐
+#define TXAV1D_BENCH_PACING_CUSTOM 2  ///< 按 pacing_fps 指定的帧率对齐
+
 /** 测试配置 */
 typedef struct Txav1dBenchConfig {
     const char *input_file;   ///< 码流路径，必填
@@ -32,6 +43,8 @@ typedef struct Txav1dBenchConfig {
     int frame_delay;          ///< 帧延迟，0 表示使用库默认
     int apply_grain;          ///< 是否应用 film grain：-1 默认，0 关闭，1 开启
     int wpp;                  ///< 是否启用 WPP：-1 默认，0 关闭，1 开启
+    int pacing;               ///< 定速模式，取 TXAV1D_BENCH_PACING_*
+    double pacing_fps;        ///< 自定义目标帧率，pacing 为 CUSTOM 时有效
 } Txav1dBenchConfig;
 
 /** 测试结果，所有时间单位均为毫秒 */
@@ -49,9 +62,9 @@ typedef struct Txav1dBenchResult {
     unsigned fps_num;         ///< 码流帧率分子
     unsigned fps_den;         ///< 码流帧率分母
 
-    double total_ms;          ///< 端到端总耗时
+    double total_ms;          ///< 端到端总耗时（定速时含节流等待）
     double demux_ms;          ///< 其中读包耗时
-    double decode_ms;         ///< 其中解码耗时（total - demux）
+    double decode_ms;         ///< 其中解码耗时（total - demux - 节流等待）
 
     double first_frame_ms;    ///< 首帧耗时，反映解码器冷启动成本
     double avg_frame_ms;      ///< 平均单帧耗时（decode_ms / decoded_frames）
@@ -59,6 +72,25 @@ typedef struct Txav1dBenchResult {
     double max_frame_ms;      ///< 最慢单帧
     double p50_frame_ms;      ///< 单帧耗时中位数
     double p95_frame_ms;      ///< 单帧耗时 P95
+
+    /**
+     * 实际生效的定速模式与目标帧率。
+     *
+     * 与配置分开返回，是因为「选了按码流帧率」但码流头里没有帧率信息时
+     * 会退回不定速。只看配置会让下游以为这组数据是定速跑的。
+     * pacing 非 OFF 且 pacing_fps > 0 才代表真的定速生效。
+     */
+    int pacing;
+    double pacing_fps;
+
+    /**
+     * 累计节流等待时长（毫秒）。
+     *
+     * 单独统计而不并入 decode_ms：等待是「故意不做事的空转」，
+     * 混进解码耗时会得出「ms/f 恰好等于目标帧间隔」这种毫无意义的数字。
+     * 它的用途是核对 total_ms 的构成：total ≈ decode + demux + wait。
+     */
+    double pacing_wait_ms;
 
     /// 逐帧解码耗时（毫秒）。由本函数 malloc，调用方用 txav1d_bench_free_result() 释放。
     double *frame_ms;

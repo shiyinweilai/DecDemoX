@@ -61,6 +61,11 @@
         _warmupRounds = 1;
         _skipFrames = 0;
         _threads = 0;
+        // 默认不定速：测速的目的是找出解码器的性能上限，
+        // 默认就限帧只会让所有版本都收敛到目标帧率、彼此看不出差异。
+        _pacingEnabled = NO;
+        _pacingUseSourceFPS = YES;
+        _pacingFPS = 0;
         // 默认不填 decoderName：早期实现为了给这个字段一个默认值，在 init 里
         // 调 BenchDecoderVersionDescription()，而它会顺着 preferredDecoder
         // 把所有版本的 dylib 全部 dlopen 一遍。构造一个配置对象本该是纯内存操作，
@@ -84,6 +89,13 @@ NSString *BenchDecoderVersionDescription(void) {
 #pragma mark - BenchRoundMetrics
 
 @implementation BenchRoundMetrics
+
+- (double)actualFPS {
+    // 用端到端总时长做分母，而不是 decodeMs：定速的等待虽然不计入解码耗时，
+    // 却实实在在占据墙钟时间，正是它把实际产帧率压到目标值。
+    if (self.totalMs <= 0 || self.decodedFrames == 0) return 0;
+    return (double)self.decodedFrames * 1000.0 / self.totalMs;
+}
 
 - (double)decodeFPS {
     if (self.avgFrameMs <= 0) return 0;
@@ -340,6 +352,41 @@ NSString *BenchDecoderVersionDescription(void) {
     return 1000.0 / avg;
 }
 
+- (double)actualFPS {
+    if (self.scoredRounds.count == 0) return 0;
+    double sum = 0;
+    NSUInteger used = 0;
+    for (BenchRoundMetrics *r in self.scoredRounds) {
+        if (r.actualFPS <= 0) continue;
+        sum += r.actualFPS;
+        used++;
+    }
+    if (used == 0) return 0;
+    return sum / (double)used;
+}
+
+- (double)pacingDeviationPercent {
+    const double target = [self pacingTargetFPS];
+    if (target <= 0) return 0;
+    const double actual = self.actualFPS;
+    if (actual <= 0) return 0;
+    // 以目标为基准：观众关心的是「离目标差多少」，而不是离实测差多少
+    return (actual - target) / target * 100.0;
+}
+
+/**
+ * 各计分轮的目标帧率，取第一个真正定速生效的轮次。
+ *
+ * 同一批次里不同码流按码流帧率定速时目标各不相同，此时该值只能代表
+ * 其中一轮；展示层若要逐码流比较，应看轮次级 pacingFPS。
+ */
+- (double)pacingTargetFPS {
+    for (BenchRoundMetrics *r in self.scoredRounds) {
+        if (r.pacingApplied && r.pacingFPS > 0) return r.pacingFPS;
+    }
+    return 0;
+}
+
 - (double)peakDecodeFPS {
     // 与 minAvgFrameMs 严格互为倒数：汇总表把这两列并排展示，
     // 若各自取不同的轮次，读者会看到「fps 涨了但 ms 也涨了」这种不可能的组合。
@@ -426,8 +473,11 @@ NSString *BenchDecoderVersionDescription(void) {
     const NSUInteger totalRounds = self.roundsPlanned;
     const NSUInteger limitFrames = config.limitFrames;
     const NSUInteger skipFrames = config.skipFrames;
-    const NSInteger threads = config.threads;
+    const NSUInteger threads = config.threads;
     const BenchSchedulePolicy schedulePolicy = config.schedulePolicy;
+    const BOOL pacingEnabled = config.pacingEnabled;
+    const BOOL pacingUseSourceFPS = config.pacingUseSourceFPS;
+    const double pacingFPS = config.pacingFPS;
     // 不再在这里兜底调 preferredDecoder：那是主线程上的隐式 dlopen。
     // 解码器必须由调用方从勾选结果里显式传入，缺失即视为配置错误。
     BenchDecoder *decoder = config.decoder;
@@ -501,6 +551,9 @@ NSString *BenchDecoderVersionDescription(void) {
                                                                  skip:skipFrames
                                                               threads:threads
                                                        schedulePolicy:schedulePolicy
+                                                               pacing:pacingEnabled
+                                                    pacingUseSourceFPS:pacingUseSourceFPS
+                                                            pacingFPS:pacingFPS
                                                               decoder:decoder];
             if (!metrics) {
                 fatalError = @"解码失败，请检查码流是否有效";
@@ -543,6 +596,9 @@ NSString *BenchDecoderVersionDescription(void) {
                                    skip:config.skipFrames
                                 threads:config.threads
                          schedulePolicy:config.schedulePolicy
+                                 pacing:config.pacingEnabled
+                      pacingUseSourceFPS:config.pacingUseSourceFPS
+                              pacingFPS:config.pacingFPS
                                 decoder:config.decoder];
 }
 
@@ -557,6 +613,9 @@ NSString *BenchDecoderVersionDescription(void) {
                                          skip:(NSUInteger)skipFrames
                                       threads:(NSInteger)threads
                                schedulePolicy:(BenchSchedulePolicy)schedulePolicy
+                                       pacing:(BOOL)pacingEnabled
+                            pacingUseSourceFPS:(BOOL)pacingUseSourceFPS
+                                    pacingFPS:(double)pacingFPS
                                       decoder:(BenchDecoder *)decoder {
     Txav1dBenchConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
@@ -566,6 +625,17 @@ NSString *BenchDecoderVersionDescription(void) {
     cfg.threads = (int)threads;
     cfg.apply_grain = -1;   // 未显式指定时交由库默认
     cfg.wpp = -1;
+    // 定速是「解码循环节流」，不是解码器参数，所以它走 bench 配置而不是
+    // settings。关闭时填 OFF 而不是依赖 memset 的 0：靠 0 值巧合语义
+    // 太脆弱，将来若新增「按帧数」之类模式，0 的含义就会变。
+    if (pacingEnabled) {
+        cfg.pacing = pacingUseSourceFPS ? TXAV1D_BENCH_PACING_SOURCE
+                                        : TXAV1D_BENCH_PACING_CUSTOM;
+        cfg.pacing_fps = pacingUseSourceFPS ? 0 : pacingFPS;
+    } else {
+        cfg.pacing = TXAV1D_BENCH_PACING_OFF;
+        cfg.pacing_fps = 0;
+    }
 
     Txav1dBenchResult result;
     memset(&result, 0, sizeof(result));
@@ -671,6 +741,12 @@ NSString *BenchDecoderVersionDescription(void) {
     metrics.maxFrameMs = result.max_frame_ms;
     metrics.p50FrameMs = result.p50_frame_ms;
     metrics.p95FrameMs = result.p95_frame_ms;
+    // 定速状态取库回填值：配置说「按码流帧率」但码流头缺帧率时库会退回
+    // 不定速，此时若照抄配置，下游会误以为这组数据是在定速下跑的。
+    metrics.pacingApplied = (result.pacing != TXAV1D_BENCH_PACING_OFF)
+        && (result.pacing_fps > 0);
+    metrics.pacingFPS = result.pacing_fps;
+    metrics.pacingWaitMs = result.pacing_wait_ms;
 
     // 平均值改用整轮同步差分：它覆盖解码全程、与轮次长短无关。
     // 区间无效（时钟跳变等）时退回定时器均值；两者都没有就标记为「无采样」。
