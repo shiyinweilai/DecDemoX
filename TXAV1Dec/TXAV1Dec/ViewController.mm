@@ -246,7 +246,12 @@
 @property (nonatomic, strong) UILabel *secondaryLabel;
 
 @property (nonatomic, strong) UIButton *reportCopyButton;
+
+/// 详细版导出内容（含逐轮明细）。自测日志也打印这一份，覆盖字段最全。
 @property (nonatomic, copy) NSString *reportText;
+
+/// 总结版导出内容（只到组合级汇总，不含逐轮明细），与详细版同时算好
+@property (nonatomic, copy) NSString *reportSummaryText;
 
 // 数据
 @property (nonatomic, strong) NSArray<BenchStream *> *streams;
@@ -296,6 +301,12 @@
     self.pendingCombinations = [NSMutableArray array];
     self.decoders = @[];
     self.selectedDecoders = [NSMutableArray array];
+
+    // 必须显式初始化为 -1（未指定）。NSInteger 属性默认被零初始化为 0，
+    // 而取配置处的判断是「>= 0 就用覆写值」，于是 0 恒成立、覆写值恒为 0，
+    // 界面上的线程分段控件从头到尾都不生效——选 1/2/4/8 全都变成「自动」。
+    // 0 在配置层有专门含义（让库按核心数取满），不能兼作「未指定」的哨兵。
+    self.threadsOverride = -1;
 
     [self buildScrollHierarchy];
     [self buildDeviceHeader];
@@ -941,6 +952,7 @@
     [self.failedStreamNames removeAllObjects];
     [self.pendingCombinations removeAllObjects];
     self.reportText = nil;
+    self.reportSummaryText = nil;
     self.reportCopyButton.enabled = NO;
     self.resultCard.hidden = YES;
     self.batchCancelled = NO;
@@ -1144,12 +1156,13 @@
     titleLabel.font = [BenchTheme sectionFont];
     titleLabel.textColor = [BenchTheme secondaryText];
 
-    self.reportCopyButton = [BenchSecondaryButton compactButtonWithTitle:@"复制报告"];
-    [self.reportCopyButton addTarget:self
-                              action:@selector(copyReportTapped)
-                    forControlEvents:UIControlEventTouchUpInside];
+    // 导出分成详细与总结两种粒度，用下拉菜单而不是把两个按钮并排：
+    // 表头右侧空间只够放一个小按钮，两个并排会把「测试结果」标题挤掉；
+    // 而菜单默认收起，只在需要导出时才多一次点击，日常不占空间。
+    self.reportCopyButton = [BenchSecondaryButton compactButtonWithTitle:@"导出报告"];
     [self.reportCopyButton setContentHuggingPriority:UILayoutPriorityRequired
                                             forAxis:UILayoutConstraintAxisHorizontal];
+    [self configureReportExportMenu];
     self.reportCopyButton.enabled = NO;
 
     UIStackView *headerRow = [[UIStackView alloc] initWithArrangedSubviews:@[
@@ -1196,7 +1209,10 @@
 - (void)presentBatchResults {
     [self presentMatrix];
 
-    self.reportText = [self buildBatchReportText];
+    // 两份都在这里算好：导出时才生成的话，用户点菜单那一刻要卡一下，
+    // 而且结果集是固定的，提前算好没有任何副作用。
+    self.reportText = [self buildBatchReportJSONTextIncludeRounds:YES];
+    self.reportSummaryText = [self buildBatchReportJSONTextIncludeRounds:NO];
     self.reportCopyButton.enabled = YES;
     self.resultCard.hidden = NO;
 }
@@ -1243,8 +1259,11 @@
             }
             continue;
         }
-        [fps addObject:[NSString stringWithFormat:@"%.1f", s.decodeFPS]];
-        [mspf addObject:[NSString stringWithFormat:@"%.2f", s.avgFrameMs]];
+        // fps 与 ms/f 必须同源：两者互为倒数，若 fps 取最快轮、ms 取各轮均值，
+        // 同一行会出现「fps 变高但单帧耗时也变长」这种自相矛盾的组合。
+        // 这里都取最快的一轮（轮内均帧耗时最小），即峰值口径。
+        [fps addObject:[NSString stringWithFormat:@"%.1f", s.peakDecodeFPS]];
+        [mspf addObject:[NSString stringWithFormat:@"%.2f", s.minAvgFrameMs]];
         // CPU 用整机占比，与报告同口径。两位小数：6 核机上整机占比
         // 一位小数只有 0.6% 单核的精度，两档实现并列时常显示成同一个数。
         // 无采样必须显示 --：0.00% 会被读成「几乎不占 CPU」，与事实相反。
@@ -1262,12 +1281,13 @@
     // 前四个是每次挑选版本都必看的量，波动和 P95 用于进一步挑刺，
     // 放在尾部既不打断主线，又能固定占据最后两行便于纵向扫视。
     [self.matrixView reloadWithHeaders:headers
-                             rowTitles:@[@"解码帧率 fps", @"单帧耗时 ms", @"CPU 整机",
+                             rowTitles:@[@"峰值帧率 fps", @"单帧耗时 ms", @"CPU 整机",
                                          @"净内存 MB", @"波动", @"P95 ms"]
                                 values:@[fps, mspf, cpu, memory, jitter, p95]
                          emphasizedRow:0];
 
     self.metricLegendLabel.text =
+        @"fps 与单帧耗时取最快的一轮（峰值口径），两者互为倒数、同源可比；整体均值见复制出的 JSON。\n"
         @"波动 = 轮间标准差 ÷ 均值。反复跑同一版本时每轮结果的离散程度，反映测试是否稳定；"
         @"它不是帧与帧之间的抖动。有效轮次不足 2 轮时为 0.00%，只说明样本不够，不代表稳定。\n"
         @"P95 = 最后一轮内全部帧耗时排序后的第 95 百分位，即 95% 的帧不慢于该值。"
@@ -1350,226 +1370,269 @@
     return [blocks componentsJoinedByString:@"\n\n"];
 }
 
-/// 批量测试的报告文本：每个码流一段，末尾附对比表
-- (NSString *)buildBatchReportText {
-    NSMutableString *text = [NSMutableString string];
 
-    if (self.batchResults.count == 1) {
-        BenchStreamResult *result = self.batchResults.firstObject;
-        [text appendString:[result.summary textReportWithConfig:result.config]];
-    } else {
-        // 标题里写明规模：多版本多码流时，"12 个组合"远比"12 个"有信息量，
-        // 读者能立刻知道这张表是两个维度的笛卡尔积。
-        if (self.batchDecoderCount > 1 && self.batchStreamCount > 1) {
-            [text appendFormat:@"===== txav1d 多版本 × 多码流对比 (%lu 版本 × %lu 码流 = %lu 组合) =====\n",
-                (unsigned long)self.batchDecoderCount,
-                (unsigned long)self.batchStreamCount,
-                (unsigned long)self.batchResults.count];
-        } else if (self.batchDecoderCount > 1) {
-            [text appendFormat:@"===== txav1d 多版本对比测试 (%lu 个版本) =====\n",
-                (unsigned long)self.batchResults.count];
-        } else {
-            [text appendFormat:@"===== txav1d 多码流对比测试 (%lu 个) =====\n",
-                (unsigned long)self.batchResults.count];
-        }
-        [text appendFormat:@"设备      : %@ (%@)\n",
-            [BenchSystemMetrics deviceName], [BenchSystemMetrics machineIdentifier]];
-        [text appendFormat:@"CPU       : %@\n", [BenchSystemMetrics coreTopologyDescription]];
-        [text appendFormat:@"热状态    : %@\n", [BenchSystemMetrics thermalStateDescription]];
-        [text appendFormat:@"时间      : %@\n",
-            [NSDateFormatter localizedStringFromDate:[NSDate date]
-                                           dateStyle:NSDateFormatterMediumStyle
-                                           timeStyle:NSDateFormatterMediumStyle]];
+#pragma mark - JSON 报告
 
-        // 参数对所有组合一致，只写一次
-        BenchStreamResult *first = self.batchResults.firstObject;
-        BenchRunConfig *cfg = first.config;
-        // 多版本时逐个列出参与版本：只写"多个版本"等于没写，
-        // 事后根本无法确认这批数字覆盖了哪些库。
-        if (self.batchDecoderCount > 1) {
-            NSMutableArray<NSString *> *versions = [NSMutableArray array];
-            for (BenchDecoder *decoder in self.selectedDecoders) {
-                [versions addObject:decoder.version];
-            }
-            [text appendFormat:@"解码器    : %lu 个版本（%@）\n",
-                (unsigned long)versions.count,
-                [versions componentsJoinedByString:@", "]];
-        } else {
-            [text appendFormat:@"解码器    : %@\n",
-                cfg.decoderName.length > 0 ? cfg.decoderName : BenchDecoderVersionDescription()];
-        }
-        [text appendFormat:@"每轮帧数  : %@\n",
-            cfg.limitFrames > 0 ? [NSString stringWithFormat:@"%lu", (unsigned long)cfg.limitFrames] : @"全部"];
-        [text appendFormat:@"轮次      : %lu 正式 + %lu 预热\n",
-            (unsigned long)cfg.rounds, (unsigned long)cfg.warmupRounds];
-        [text appendFormat:@"线程数    : %@\n",
-            cfg.threads > 0 ? [NSString stringWithFormat:@"%ld", (long)cfg.threads] : @"自动"];
-        [text appendFormat:@"调度偏好  : %@ —— %@\n",
-            [BenchSystemMetrics schedulePolicyName:cfg.schedulePolicy],
-            [BenchSystemMetrics schedulePolicyNote:cfg.schedulePolicy]];
+/// ISO8601 时间戳：JSON 里不放本地化的「11月3日 16:40」，
+/// 那种格式换台机器解析就报错，脚本也无法比较先后。
+static NSString *BenchJSONTimestamp(NSDate *date) {
+    static NSISO8601DateFormatter *formatter = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        formatter = [[NSISO8601DateFormatter alloc] init];
+        formatter.formatOptions = NSISO8601DateFormatWithInternetDateTime |
+                                  NSISO8601DateFormatWithFractionalSeconds;
+    });
+    return [formatter stringFromDate:date] ?: @"";
+}
 
-        [text appendString:@"\n---------- 对比 ----------\n"];
-        // 不能用 %-22s：中文是多字节 UTF-8，按字节数补齐会让列宽错位甚至截断成乱码。
-        // 这里统一按字符数右侧补空格。
-        void (^appendPadded)(NSString *, NSUInteger) = ^(NSString *value, NSUInteger width) {
-            NSUInteger length = value.length;
-            if (length >= width) {
-                [text appendString:value];
-                return;
-            }
-            [text appendString:value];
-            [text appendString:[@"" stringByPaddingToLength:(width - length)
-                                                withString:@" "
-                                           startingAtIndex:0]];
-        };
+/**
+ * 把 double 收进 JSON。
+ *
+ * JSON 没有 NaN / Infinity，NSJSONSerialization 遇到它们会直接抛异常、
+ * 整个文件导出失败。这两种值在「无采样」时会真实出现（例如 0 做除数），
+ * 所以统一折成 null，让下游一眼看出「这项没有值」而不是拿到 0 当真值。
+ */
+static id BenchJSONNumber(double value, int digits) {
+    if (isnan(value) || isinf(value)) return [NSNull null];
+    // 不能直接 @(round(value*scale)/scale)：二进制浮点存不下 574.81 这类十进制小数，
+    // 序列化后会写出 574.80999999999995，污染下游处理。
+    // NSNumber 的 decimalValue 同样会带出二进制尾数，所以先按定点格式化成字符串，
+    // 再由字符串构造 NSDecimalNumber —— 它仍是 NSNumber 子类，JSON 里输出为数字而非字符串。
+    NSString *text = [NSString stringWithFormat:@"%.*f", digits, value];
+    return [NSDecimalNumber decimalNumberWithString:text
+                                             locale:@{NSLocaleDecimalSeparator : @"."}];
+}
 
-        appendPadded(@"版本", 10);
-        appendPadded(@"fps", 9);
-        appendPadded(@"ms/f", 9);
-        appendPadded(@"CPU%", 9);
-        appendPadded(@"波动%", 9);
-        appendPadded(@"P95ms", 9);
-        appendPadded(@"净内存MB", 11);
-        [text appendString:@"\n"];
+static id BenchJSONInteger(NSUInteger value) {
+    return @(value);
+}
 
-        // 报告里不放码流名：同一批测试的条件是对齐的，码流名对每行都一样，
-        // 逐行重复既不提供信息，还挤掉指标列的宽度。
-        for (BenchStreamResult *result in self.batchResults) {
-            BenchSummary *s = result.summary;
-            if (s.scoredCount == 0) continue;
-            appendPadded(result.decoderDisplayName, 10);
-            appendPadded([NSString stringWithFormat:@"%.2f", s.decodeFPS], 9);
-            appendPadded([NSString stringWithFormat:@"%.3f", s.avgFrameMs], 9);
-            appendPadded(s.avgCPUSampled
-                         ? [NSString stringWithFormat:@"%.2f", s.cpuSharePercent] : @"--", 9);
-            appendPadded([NSString stringWithFormat:@"%.2f", s.fluctuationPercent], 9);
-            appendPadded([NSString stringWithFormat:@"%.2f",
-                          result.rounds.lastObject.p95FrameMs], 9);
-            appendPadded(s.memorySampled
-                         ? [NSString stringWithFormat:@"%.1f", s.footprintDeltaMB] : @"--", 11);
-            [text appendString:@"\n"];
-        }
+/// 字符串字段统一处理 nil：JSON 里用 null 占位，保持字段永远存在
+static id BenchJSONString(NSString *value) {
+    return value.length > 0 ? value : [NSNull null];
+}
 
-        [text appendString:@"\n（CPU% 为整机占比；波动% = 轮间标准差/均值，越低越稳定；-- 表示无有效采样）\n"];
+/**
+ * 批量测试结果导出为 JSON。
+ *
+ * 只做「把测到的值如实倒出来」这一件事：不做跨版本减法、不预设基准、
+ * 不算提升百分比。需要比较时由下游按 fps_peak / cpu_share_percent 自行计算，
+ * 这样任何比较口径的调整都不必改 App。
+ *
+ * 每项指标同时给出均值与峰值两个口径：峰值轮反映这批测试里跑得最好的一次，
+ * 均值反映整体水平，被慢轮拖低多少本身就是稳定性信息，只留一套都会丢东西。
+ *
+ * @param includeRounds YES 导出详细版（含逐轮明细）；NO 导出总结版（只到组合级汇总）。
+ *        汇总字段完全相同，区别仅在于 results[].rounds 是否存在，
+ *        下游解析逻辑无需为两种版本写两套。
+ */
+- (NSString *)buildBatchReportJSONTextIncludeRounds:(BOOL)includeRounds {
+    NSMutableDictionary *root = [NSMutableDictionary dictionary];
+    root[@"schema_version"] = @1;
+    // 显式写明粒度：两种导出共用同一套字段，只有 results[].rounds 的存缺不同，
+    // 下游凭这个字段就能判断该文件能否做轮级分析，不必去猜字段为何缺失。
+    root[@"export_scope"] = includeRounds ? @"detailed" : @"summary";
+    root[@"generated_at"] = BenchJSONTimestamp([NSDate date]);
 
-        // 同码流跨版本对比：这才是多版本测试真正要看的表。
-        // 上面的表按组合罗列，要自己横着找同一个码流的两行再比，
-        // 版本一多就容易错位，所以直接把「相对基准版本的提升」算出来。
-        if (self.batchDecoderCount > 1 && self.batchStreamCount >= 1) {
-            [text appendString:@"\n---------- 跨版本提升 ----------\n"];
-            [text appendFormat:@"基准 = %@（各版本相对它的 fps 与 CPU 变化）\n",
-                self.selectedDecoders.lastObject.version];
+    // 设备与运行条件对所有组合都相同，只写在顶层。
+    // 逐条重复会让结果数组里每个元素都带一份同样的几十个字段，
+    // 既膨胀体积，也埋下「改一处漏一处」的隐患。
+    NSMutableDictionary *device = [NSMutableDictionary dictionary];
+    device[@"name"] = BenchJSONString([BenchSystemMetrics deviceName]);
+    device[@"model"] = BenchJSONString([BenchSystemMetrics machineIdentifier]);
+    device[@"cpu"] = BenchJSONString([BenchSystemMetrics coreTopologyDescription]);
+    device[@"processor_count"] = BenchJSONInteger([BenchSystemMetrics processorCount]);
+    device[@"performance_cores"] = BenchJSONInteger([BenchSystemMetrics performanceCoreCount]);
+    device[@"efficiency_cores"] = BenchJSONInteger([BenchSystemMetrics efficiencyCoreCount]);
+    device[@"thermal_state"] = BenchJSONString([BenchSystemMetrics thermalStateDescription]);
+    root[@"device"] = device;
 
-            for (BenchStream *stream in self.selectedStreams) {
-                NSMutableArray<BenchStreamResult *> *rows = [NSMutableArray array];
-                for (BenchStreamResult *result in self.batchResults) {
-                    if ([result.stream.name isEqualToString:stream.name]) {
-                        [rows addObject:result];
-                    }
-                }
-                if (rows.count < 2) continue;
+    BenchStreamResult *first = self.batchResults.firstObject;
+    BenchRunConfig *cfg = first.config;
+    NSMutableDictionary *config = [NSMutableDictionary dictionary];
+    config[@"decoder_count"] = BenchJSONInteger(self.batchDecoderCount);
+    config[@"stream_count"] = BenchJSONInteger(self.batchStreamCount);
+    config[@"combination_count"] = BenchJSONInteger(self.batchResults.count);
+    config[@"rounds"] = BenchJSONInteger(cfg.rounds);
+    config[@"warmup_rounds"] = BenchJSONInteger(cfg.warmupRounds);
+    config[@"skip_frames"] = BenchJSONInteger(cfg.skipFrames);
+    // limit_frames 为 0 表示整条码流，用 null 比写 0 更不容易被误读成「跑 0 帧」
+    config[@"limit_frames"] = cfg.limitFrames > 0
+        ? BenchJSONInteger(cfg.limitFrames) : [NSNull null];
+    // 线程数同时给数值与语义：0 在库层是「自动取满」，单看数字会以为是没设
+    config[@"threads"] = BenchJSONInteger((NSUInteger)MAX(cfg.threads, 0));
+    config[@"threads_mode"] = cfg.threads > 0 ? @"manual" : @"auto";
+    config[@"schedule_policy"] = BenchJSONString(
+        [BenchSystemMetrics schedulePolicyName:cfg.schedulePolicy]);
+    config[@"schedule_policy_note"] = BenchJSONString(
+        [BenchSystemMetrics schedulePolicyNote:cfg.schedulePolicy]);
+    root[@"config"] = config;
 
-                BenchSummary *baseline = rows.lastObject.summary;
-                if (baseline.scoredCount == 0 || baseline.decodeFPS <= 0) continue;
-
-                // 不写码流名：同一批测试条件对齐，读者只需要看版本之间的差异。
-                // 只有真的勾了多个码流时才标出来，否则同名两段无法区分。
-                if (self.batchStreamCount > 1) {
-                    [text appendFormat:@"\n--- %@ ---\n", rows.lastObject.streamDisplayName];
-                } else {
-                    [text appendString:@"\n"];
-                }
-                appendPadded(@"版本", 10);
-                appendPadded(@"fps", 9);
-                appendPadded(@"fps变化", 11);
-                appendPadded(@"CPU%", 9);
-                appendPadded(@"CPU变化", 11);
-                appendPadded(@"ms/f", 9);
-                [text appendString:@"\n"];
-
-                for (BenchStreamResult *result in rows) {
-                    BenchSummary *s = result.summary;
-                    if (s.scoredCount == 0) continue;
-                    const double fpsDelta = (s.decodeFPS / baseline.decodeFPS - 1.0) * 100.0;
-                    NSString *fpsChange = fabs(fpsDelta) < 0.05
-                        ? @"持平" : [NSString stringWithFormat:@"%+.1f%%", fpsDelta];
-
-                    // 任一侧无采样就不能算变化的百分比：
-                    // 0 当分母已排除，0 当分子会得出「-100%」这种假结论。
-                    NSString *cpuChange = @"--";
-                    if (baseline.avgCPUSampled && s.avgCPUSampled
-                        && baseline.cpuSharePercent > 0) {
-                        const double cpuDelta =
-                            (s.cpuSharePercent / baseline.cpuSharePercent - 1.0) * 100.0;
-                        cpuChange = fabs(cpuDelta) < 0.05
-                            ? @"持平" : [NSString stringWithFormat:@"%+.1f%%", cpuDelta];
-                    }
-
-                    appendPadded(result.decoderDisplayName, 10);
-                    appendPadded([NSString stringWithFormat:@"%.2f", s.decodeFPS], 9);
-                    appendPadded(fpsChange, 11);
-                    appendPadded(s.avgCPUSampled
-                                 ? [NSString stringWithFormat:@"%.2f", s.cpuSharePercent] : @"--", 9);
-                    appendPadded(cpuChange, 11);
-                    appendPadded([NSString stringWithFormat:@"%.3f", s.avgFrameMs], 9);
-                    [text appendString:@"\n"];
-                }
-            }
-            [text appendString:@"\n（fps 越高越好，CPU% 越低越好；变化幅度在测量波动内即为持平；-- 表示无有效采样）\n"];
-        }
-
-        [text appendString:@"\n---------- 逐组合明细 ----------\n"];
-        for (BenchStreamResult *result in self.batchResults) {
-            // 不写码流名：同一批测试条件对齐，读者只需要区分版本。
-            // 多码流导致同名重复时，用序号标记到与上表一致。
-            NSUInteger sameNameCount = 0;
-            for (BenchStreamResult *other in self.batchResults) {
-                if ([other.decoderDisplayName isEqualToString:result.decoderDisplayName]) {
-                    sameNameCount++;
-                }
-            }
-            NSString *detailTitle = result.decoderDisplayName;
-            if (sameNameCount > 1) {
-                NSUInteger ordinal = 0;
-                for (BenchStreamResult *other in self.batchResults) {
-                    if (other == result) break;
-                    if ([other.decoderDisplayName isEqualToString:result.decoderDisplayName]) {
-                        ordinal++;
-                    }
-                }
-                detailTitle = [NSString stringWithFormat:@"%@ #%lu",
-                               result.decoderDisplayName, (unsigned long)(ordinal + 1)];
-            }
-            [text appendFormat:@"\n--- %@ ---\n", detailTitle];
-            BenchSummary *s = result.summary;
-            [text appendFormat:@"单帧 %.4f ms  P95 %.4f ms  fps %.2f  %@\n",
-                s.avgFrameMs,
-                result.rounds.lastObject.p95FrameMs,
-                s.decodeFPS,
-                result.rounds.lastObject.resolutionDescription];
-            [text appendFormat:@"CPU 整机 %@\n",
-                s.avgCPUSampled
-                    ? [NSString stringWithFormat:@"%.1f%% = %.0f%% 单核口径 = %.2f 核",
-                       s.cpuSharePercent, s.avgCPUPercent, s.avgCPUCores]
-                    : @"无采样"];
-            [text appendFormat:@"波动 %.2f%%（轮间标准差 %.4f ms）\n",
-                s.fluctuationPercent, s.stddevFrameMs];
-            [text appendFormat:@"净内存 %@\n",
-                s.memorySampled
-                    ? [NSString stringWithFormat:@"%.1f MB（峰值 %.1f MB，resident 峰 %.1f MB）",
-                       s.footprintDeltaMB, s.peakFootprintMB, s.peakResidentMB]
-                    : @"无采样"];
-        }
+    NSMutableArray *decoders = [NSMutableArray array];
+    for (BenchDecoder *decoder in self.selectedDecoders) {
+        [decoders addObject:BenchJSONString(decoder.version)];
     }
+    root[@"decoders"] = decoders;
 
-    if (self.failedStreamNames.count > 0) {
-        [text appendString:@"\n---------- 失败 ----------\n"];
-        for (NSString *failure in self.failedStreamNames) {
-            [text appendFormat:@"%@\n", failure];
+    NSMutableArray *results = [NSMutableArray array];
+    for (BenchStreamResult *result in self.batchResults) {
+        BenchSummary *s = result.summary;
+        NSMutableDictionary *item = [NSMutableDictionary dictionary];
+        item[@"decoder"] = BenchJSONString([result decoderDisplayName]);
+        item[@"library_reported_version"] =
+            BenchJSONString(result.decoder.libraryReportedVersion);
+        item[@"build_stamp"] = BenchJSONString(result.decoder.buildStamp);
+        item[@"stream"] = BenchJSONString([result streamDisplayName]);
+        item[@"has_scored_rounds"] = @(s.scoredCount > 0);
+
+        BenchRoundMetrics *sample = s.scoredRounds.firstObject;
+        if (sample) {
+            item[@"width"] = BenchJSONInteger((NSUInteger)sample.width);
+            item[@"height"] = BenchJSONInteger((NSUInteger)sample.height);
+            item[@"bit_depth"] = BenchJSONInteger((NSUInteger)sample.bpc);
+            item[@"source_fps"] = BenchJSONNumber(sample.sourceFPS, 3);
+            item[@"total_frames"] = BenchJSONInteger(sample.totalFrames);
+            item[@"resolution"] = BenchJSONString(sample.resolutionDescription);
         }
-    }
 
-    return text;
+        // 帧率：峰值 = 最快轮，均值 = 各轮等权平均。
+        // 两者必须成对使用——峰值 fps 要和「最快轮的单帧耗时」配，
+        // 拿峰值 fps 去对均值 ms 会得到数学上不可能的组合。
+        NSMutableDictionary *summary = [NSMutableDictionary dictionary];
+        summary[@"scored_rounds"] = BenchJSONInteger(s.scoredCount);
+        summary[@"fps_peak"] = BenchJSONNumber(s.peakDecodeFPS, 3);
+        summary[@"fps_avg"] = BenchJSONNumber(s.decodeFPS, 3);
+        summary[@"frame_ms_peak"] = BenchJSONNumber(s.minAvgFrameMs, 4);
+        summary[@"frame_ms_avg"] = BenchJSONNumber(s.avgFrameMs, 4);
+        summary[@"frame_ms_worst"] = BenchJSONNumber(s.maxAvgFrameMs, 4);
+        summary[@"frame_ms_stddev"] = BenchJSONNumber(s.stddevFrameMs, 4);
+        summary[@"fluctuation_percent"] = BenchJSONNumber(s.fluctuationPercent, 2);
+        summary[@"speed_ratio"] = BenchJSONNumber(s.speedRatio, 3);
+
+        // 无采样时 cpu_share_percent 等字段的内部值是 0，直接输出会被读成
+        // 「几乎不占 CPU」。用 null 表达「没测到」，把 0 和未知彻底分开。
+        const BOOL cpuSampled = s.avgCPUSampled;
+        summary[@"cpu_sampled"] = @(cpuSampled);
+        summary[@"cpu_share_percent"] = cpuSampled
+            ? BenchJSONNumber(s.cpuSharePercent, 2) : [NSNull null];
+        summary[@"cpu_percent"] = cpuSampled
+            ? BenchJSONNumber(s.avgCPUPercent, 1) : [NSNull null];
+        summary[@"cpu_cores"] = cpuSampled
+            ? BenchJSONNumber(s.avgCPUCores, 3) : [NSNull null];
+        summary[@"cpu_seconds_per_frame"] = cpuSampled
+            ? BenchJSONNumber(s.cpuSecondsPerFrame, 6) : [NSNull null];
+        summary[@"cpu_peak_sampled"] = @(s.peakCPUSampled);
+        summary[@"cpu_peak_percent"] = s.peakCPUSampled
+            ? BenchJSONNumber(s.peakCPUPercent, 1) : [NSNull null];
+        summary[@"cpu_peak_cores"] = s.peakCPUSampled
+            ? BenchJSONNumber(s.peakCPUCores, 3) : [NSNull null];
+
+        const BOOL memorySampled = s.memorySampled;
+        summary[@"memory_sampled"] = @(memorySampled);
+        summary[@"footprint_delta_mb"] = memorySampled
+            ? BenchJSONNumber(s.footprintDeltaMB, 2) : [NSNull null];
+        summary[@"footprint_delta_kb_per_frame"] = memorySampled
+            ? BenchJSONNumber(s.footprintDeltaKBPerFrame, 2) : [NSNull null];
+        summary[@"footprint_peak_mb"] = memorySampled
+            ? BenchJSONNumber(s.peakFootprintMB, 2) : [NSNull null];
+        summary[@"footprint_avg_mb"] = memorySampled
+            ? BenchJSONNumber(s.avgFootprintMB, 2) : [NSNull null];
+        summary[@"resident_peak_mb"] = memorySampled
+            ? BenchJSONNumber(s.peakResidentMB, 2) : [NSNull null];
+        summary[@"resident_avg_mb"] = memorySampled
+            ? BenchJSONNumber(s.avgResidentMB, 2) : [NSNull null];
+        summary[@"baseline_footprint_mb"] = sample
+            ? BenchJSONNumber(sample.baselineFootprintMB, 2) : [NSNull null];
+
+        // P95/P50 只在轮内计算过，没有跨轮聚合，所以显式标明取自最后一轮，
+        // 否则下游会以为这是全批次的百分位。
+        BenchRoundMetrics *last = s.scoredRounds.lastObject;
+        summary[@"p95_ms_last_round"] = last
+            ? BenchJSONNumber(last.p95FrameMs, 4) : [NSNull null];
+        summary[@"p50_ms_last_round"] = last
+            ? BenchJSONNumber(last.p50FrameMs, 4) : [NSNull null];
+        item[@"summary"] = summary;
+
+        // 逐轮明细包含预热轮并带 is_warmup 标记：预热轮的冷启动开销本身
+        // 就是有价值的观察对象，是否剔除交给下游决定，而不是在这里替用户删掉。
+        // 总结版直接省掉整个数组，而不是给空数组：空数组会被读成「测了但没有轮次」，
+        // 缺失字段才能表达「这次导出本来就不含这一层」。
+        if (includeRounds) {
+            NSMutableArray *rounds = [NSMutableArray array];
+            for (BenchRoundMetrics *r in result.rounds) {
+                NSMutableDictionary *round = [NSMutableDictionary dictionary];
+                round[@"index"] = BenchJSONInteger(r.index);
+                round[@"is_warmup"] = @(r.isWarmup);
+                round[@"decoded_frames"] = BenchJSONInteger(r.decodedFrames);
+                round[@"total_frames"] = BenchJSONInteger(r.totalFrames);
+                round[@"frame_ms_avg"] = BenchJSONNumber(r.avgFrameMs, 4);
+                round[@"frame_ms_min"] = BenchJSONNumber(r.minFrameMs, 4);
+                round[@"frame_ms_max"] = BenchJSONNumber(r.maxFrameMs, 4);
+                round[@"p50_ms"] = BenchJSONNumber(r.p50FrameMs, 4);
+                round[@"p95_ms"] = BenchJSONNumber(r.p95FrameMs, 4);
+                round[@"fps"] = BenchJSONNumber(r.decodeFPS, 3);
+                round[@"total_ms"] = BenchJSONNumber(r.totalMs, 3);
+                round[@"demux_ms"] = BenchJSONNumber(r.demuxMs, 3);
+                round[@"decode_ms"] = BenchJSONNumber(r.decodeMs, 3);
+                round[@"first_frame_ms"] = BenchJSONNumber(r.firstFrameMs, 3);
+                round[@"peak_thread_count"] =
+                    BenchJSONInteger((NSUInteger)MAX(r.peakThreadCount, 0));
+                // 区间墙钟与 CPU 时长仅用于诊断：二者之比即 cpu_percent，
+                // 与 decode_ms 相差很大时说明区间里混进了非解码开销。
+                round[@"cpu_interval_wall_ms"] = BenchJSONNumber(r.cpuIntervalWallMs, 3);
+                round[@"cpu_interval_cpu_ms"] = BenchJSONNumber(r.cpuIntervalCPUMs, 3);
+                round[@"cpu_sampled"] = @(r.cpuSampled);
+                round[@"cpu_percent"] = r.cpuSampled
+                    ? BenchJSONNumber(r.avgCPUPercent, 1) : [NSNull null];
+                round[@"cpu_share_percent"] = r.cpuSampled
+                    ? BenchJSONNumber(r.cpuSharePercent, 2) : [NSNull null];
+                round[@"cpu_peak_percent"] = r.peakCPUSampled
+                    ? BenchJSONNumber(r.peakCPUPercent, 1) : [NSNull null];
+                round[@"cpu_peak_sampled"] = @(r.peakCPUSampled);
+                round[@"memory_sampled"] = @(r.memorySampled);
+                round[@"footprint_delta_mb"] = r.memorySampled
+                    ? BenchJSONNumber(r.footprintDeltaMB, 2) : [NSNull null];
+                round[@"footprint_peak_mb"] = r.memorySampled
+                    ? BenchJSONNumber(r.peakFootprintMB, 2) : [NSNull null];
+                round[@"footprint_avg_mb"] = r.memorySampled
+                    ? BenchJSONNumber(r.avgFootprintMB, 2) : [NSNull null];
+                round[@"resident_peak_mb"] = r.memorySampled
+                    ? BenchJSONNumber(r.peakResidentMB, 2) : [NSNull null];
+                [rounds addObject:round];
+            }
+            item[@"rounds"] = rounds;
+        }
+
+        [results addObject:item];
+    }
+    root[@"results"] = results;
+
+    NSMutableArray *failures = [NSMutableArray array];
+    for (NSString *failure in self.failedStreamNames) {
+        [failures addObject:failure];
+    }
+    root[@"failures"] = failures;
+
+    // 顶层必须是字典或数组才能序列化。sortedKeys 让字段顺序稳定，
+    // 两次导出的 diff 只会显示数值变化，不会因为键序漂移刷满屏；
+    // prettyPrinted 是为了复制出来后肉眼也能核对几行。
+    NSJSONWritingOptions options = NSJSONWritingPrettyPrinted;
+    if (@available(iOS 11.0, *)) {
+        options |= NSJSONWritingSortedKeys;
+    }
+    NSError *error = nil;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:root
+                                                  options:options
+                                                    error:&error];
+    if (!data) {
+        // 序列化失败必须让用户看见原因，而不是静默给一个空剪贴板
+        return [NSString stringWithFormat:
+                @"{\"error\":\"JSON 序列化失败\",\"detail\":\"%@\"}",
+                error.localizedDescription ?: @"未知原因"];
+    }
+    NSString *json = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    return json ?: @"{}";
 }
 
 - (void)reportHapticFeedback {
@@ -1577,28 +1640,53 @@
     [generator notificationOccurred:UINotificationFeedbackTypeSuccess];
 }
 
-#pragma mark - 复制
+#pragma mark - 导出
 
-- (void)copyReportTapped {
-    if (self.reportText.length == 0) return;
-    UIPasteboard.generalPasteboard.string = self.reportText;
+/**
+ * 挂载导出菜单。
+ *
+ * 用 showsMenuAsPrimaryAction 让按钮点一下直接弹菜单，而不是先弹一个
+ * actionSheet 再选：总共只有两个选项，多一层确认没有收益。
+ */
+- (void)configureReportExportMenu {
+    __weak typeof(self) weakSelf = self;
+
+    UIAction *detailed = [UIAction actionWithTitle:@"导出详细"
+                                            image:[UIImage systemImageNamed:@"list.bullet.rectangle"]
+                                       identifier:nil
+                                          handler:^(__kindof UIAction *action) {
+        [weakSelf exportReportIncludingRounds:YES];
+    }];
+    detailed.subtitle = @"含逐轮明细，字段最全";
+
+    UIAction *summary = [UIAction actionWithTitle:@"导出总结"
+                                            image:[UIImage systemImageNamed:@"tablecells"]
+                                       identifier:nil
+                                          handler:^(__kindof UIAction *action) {
+        [weakSelf exportReportIncludingRounds:NO];
+    }];
+    summary.subtitle = @"仅到组合级汇总，便于快速核对";
+
+    self.reportCopyButton.menu = [UIMenu menuWithTitle:@"" children:@[detailed, summary]];
+    self.reportCopyButton.showsMenuAsPrimaryAction = YES;
+}
+
+/// 按范围取对应内容写入剪贴板。两份内容在出结果时已算好，这里只做选取。
+- (void)exportReportIncludingRounds:(BOOL)includeRounds {
+    NSString *text = includeRounds ? self.reportText : self.reportSummaryText;
+    if (text.length == 0) return;
+    UIPasteboard.generalPasteboard.string = text;
 
     UINotificationFeedbackGenerator *generator = [[UINotificationFeedbackGenerator alloc] init];
     [generator notificationOccurred:UINotificationFeedbackTypeSuccess];
 
-    UIButtonConfiguration *config = self.reportCopyButton.configuration;
-    config.title = @"已复制";
-    self.reportCopyButton.configuration = config;
-
-    __weak typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        __strong typeof(weakSelf) self = weakSelf;
-        if (!self) return;
-        UIButtonConfiguration *restored = self.reportCopyButton.configuration;
-        restored.title = @"复制报告";
-        self.reportCopyButton.configuration = restored;
-    });
+    // 用底部轻提示而不是改按钮标题：按钮文字长度一变，按钮宽度会跟着变，
+    // 表头右侧的空间本就很紧，标题被挤得重新折行，看起来像布局在抖；
+    // 而且「已导出」没说清去了哪里，用户仍要猜。提示里写明落到剪贴板，
+    // 并带上具体粒度，两种导出字段差异大，复制错了很难当场发现。
+    NSString *scopeName = includeRounds ? @"详细" : @"总结";
+    [BenchToastView showInView:self.view
+                       message:[NSString stringWithFormat:@"已复制到剪贴板（%@）", scopeName]];
 }
 
 #pragma mark - UITextFieldDelegate
@@ -1779,14 +1867,17 @@
     }
 
     append(@"调度策略：%@", [BenchSystemMetrics schedulePolicyName:[self schedulePolicyFromSegment]]);
-    // 0 是「自动」而不是「指定 0 个线程」：配置层把 0 解释为让库按核心数取满，
-    // 所以这里单独判 0，避免日志写出「0（命令行指定）」这种自相矛盾的说法。
-    if (self.threadsOverride > 0) {
-        append(@"线程数：%ld（命令行指定）", (long)self.threadsOverride);
-    } else if (self.threadsOverride == 0) {
-        append(@"线程数：自动（按逻辑核数取满）");
+    // 0 是「自动」而不是「指定 0 个线程」：配置层把 0 解释为让库按核心数取满。
+    // 这里按最终生效值报告，并区分来源是命令行还是界面，避免日志与实际传参不符。
+    const NSInteger effectiveThreads = self.threadsOverride >= 0
+        ? self.threadsOverride
+        : [self threadCountFromSegment];
+    if (self.threadsOverride >= 0) {
+        append(@"线程数：%ld（命令行指定）", (long)effectiveThreads);
+    } else if (effectiveThreads > 0) {
+        append(@"线程数：%ld（界面选择）", (long)effectiveThreads);
     } else {
-        append(@"线程数：自动（库默认）");
+        append(@"线程数：自动（界面选择，按逻辑核数取满）");
     }
     append(@"开始批量测试：%lu 个码流", (unsigned long)self.batchTotal);
 

@@ -725,13 +725,21 @@ static const CGFloat kRowHeight = 40.0;
     config.title = title;
     config.contentInsets = NSDirectionalEdgeInsetsMake(8, 14, 8, 14);
     config.baseForegroundColor = [BenchTheme accent];
+
+    // 圆角与描边必须写在 configuration.background 上，不能用 layer.cornerRadius。
+    // 用 configuration 的按钮在状态变化（按下、菜单弹出）时会带着 background
+    // 重新渲染一遍，届时的圆角取的是 background.cornerRadius；layer 上的值
+    // 会被盖掉，表现为按下瞬间变直角、松手后又变回圆角。
+    // background 的 cornerRadius 内部就是连续曲率的圆角，与原来的
+    // kCACornerCurveContinuous 一致；描边色也会跟随浅深色模式，
+    // 而 layer.borderColor 存的是固定 CGColor，切换模式时不会变。
+    config.background.backgroundColor = [UIColor clearColor];
+    config.background.cornerRadius = 8;
+    config.background.strokeColor = [BenchTheme accent];
+    config.background.strokeWidth = 1.0;
     button.configuration = config;
 
     button.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
-    button.layer.cornerRadius = 8;
-    button.layer.cornerCurve = kCACornerCurveContinuous;
-    button.layer.borderWidth = 1.0;
-    button.layer.borderColor = [BenchTheme accent].CGColor;
     return button;
 }
 
@@ -739,9 +747,10 @@ static const CGFloat kRowHeight = 40.0;
     BenchSecondaryButton *button = [BenchSecondaryButton buttonWithTitle:title];
     UIButtonConfiguration *config = button.configuration;
     config.contentInsets = NSDirectionalEdgeInsetsMake(3, 10, 3, 10);
+    // 圆角同样只改 background，与上面的原因相同
+    config.background.cornerRadius = 7;
     button.configuration = config;
     button.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
-    button.layer.cornerRadius = 7;
     return button;
 }
 
@@ -1195,6 +1204,81 @@ static const CGFloat kRowHeight = 40.0;
     } completion:^(BOOL finished) {
         [self removeFromSuperview];
     }];
+}
+
+@end
+
+#pragma mark - BenchToastView
+
+@implementation BenchToastView
+
+/// 同屏只保留一条提示：新旧提示叠在一起既看不清，也会互相抢消失动画
+static __weak BenchToastView *sCurrentToast = nil;
+
++ (void)showInView:(UIView *)hostView message:(NSString *)message {
+    if (!hostView || message.length == 0) return;
+
+    [sCurrentToast removeFromSuperview];
+
+    BenchToastView *toast = [[BenchToastView alloc] initWithFrame:CGRectZero];
+    toast.translatesAutoresizingMaskIntoConstraints = NO;
+    toast.backgroundColor = [UIColor colorWithDynamicProvider:
+        ^UIColor *(UITraitCollection *traits) {
+            return traits.userInterfaceStyle == UIUserInterfaceStyleDark
+                ? [UIColor colorWithWhite:0.24 alpha:0.96]
+                : [UIColor colorWithWhite:0.16 alpha:0.92];
+        }];
+    toast.layer.cornerRadius = 10;
+    toast.layer.cornerCurve = kCACornerCurveContinuous;
+    toast.alpha = 0;
+    // 不拦截触摸：提示浮在结果区上方，若吞掉触摸会让下面的按钮短暂失效
+    toast.userInteractionEnabled = NO;
+
+    UILabel *label = [[UILabel alloc] init];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    label.text = message;
+    label.textColor = [UIColor whiteColor];
+    label.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+    label.numberOfLines = 0;
+    label.textAlignment = NSTextAlignmentCenter;
+    [toast addSubview:label];
+
+    [hostView addSubview:toast];
+    [NSLayoutConstraint activateConstraints:@[
+        [toast.centerXAnchor constraintEqualToAnchor:hostView.centerXAnchor],
+        // 贴底部安全区上方：导出按钮在页面中部偏下，提示离触发点不远，
+        // 又不会被 home indicator 压住
+        [toast.bottomAnchor constraintEqualToAnchor:hostView.safeAreaLayoutGuide.bottomAnchor
+                                          constant:-24],
+        [toast.leadingAnchor constraintGreaterThanOrEqualToAnchor:hostView.leadingAnchor
+                                                        constant:24],
+        [toast.trailingAnchor constraintLessThanOrEqualToAnchor:hostView.trailingAnchor
+                                                      constant:-24],
+        [label.topAnchor constraintEqualToAnchor:toast.topAnchor constant:10],
+        [label.bottomAnchor constraintEqualToAnchor:toast.bottomAnchor constant:-10],
+        [label.leadingAnchor constraintEqualToAnchor:toast.leadingAnchor constant:16],
+        [label.trailingAnchor constraintEqualToAnchor:toast.trailingAnchor constant:-16],
+    ]];
+
+    sCurrentToast = toast;
+
+    [UIView animateWithDuration:0.18 animations:^{
+        toast.alpha = 1;
+    }];
+
+    // 1.6 秒足够读完一行提示；提前消失会让用户来不及确认，
+    // 停留过久又会挡住下方数据。
+    __weak BenchToastView *weakToast = toast;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.6 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        BenchToastView *strongToast = weakToast;
+        if (!strongToast) return;
+        [UIView animateWithDuration:0.22 animations:^{
+            strongToast.alpha = 0;
+        } completion:^(BOOL finished) {
+            [strongToast removeFromSuperview];
+        }];
+    });
 }
 
 @end

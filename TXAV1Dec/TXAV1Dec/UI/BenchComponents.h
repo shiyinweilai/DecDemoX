@@ -260,4 +260,19 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
+#pragma mark - 轻提示
+
+/**
+ * 短暂浮在屏幕底部的轻提示，用于「已复制到剪贴板」这类一次性反馈。
+ *
+ * 为什么不用 UIAlertController：导出是低风险操作，弹窗需要用户再点一次
+ * 才能消失，打断成本高于信息价值；轻提示出现后自动消失，不阻断操作。
+ */
+@interface BenchToastView : UIView
+
+/// 在指定视图底部弹出一条提示，重复调用会替换掉尚未消失的旧提示
++ (void)showInView:(UIView *)hostView message:(NSString *)message;
+
+@end
+
 NS_ASSUME_NONNULL_END

@@ -229,7 +229,17 @@ FOUNDATION_EXPORT NSString *BenchDecoderVersionDescription(void);
 @property (nonatomic, readonly) double maxAvgFrameMs;   ///< 最差一轮
 @property (nonatomic, readonly) double stddevFrameMs;   ///< 轮间标准差，反映稳定性
 @property (nonatomic, readonly) double fluctuationPercent; ///< 标准差 / 均值
-@property (nonatomic, readonly) double decodeFPS;
+@property (nonatomic, readonly) double decodeFPS;       ///< 均值口径：1000 / avgFrameMs
+
+/**
+ * 峰值解码帧率：用最快的一轮（轮内均帧耗时最小）换算。
+ *
+ * 与 decodeFPS 的区别只在口径：平均值被慢轮拖低，峰值反映这批测试里该版本
+ * 跑得最好的一次。汇总表按峰值展示时必须与 minAvgFrameMs 配对使用，
+ * 否则同一行的 fps 与 ms/f 会来自不同轮次，互相矛盾。
+ */
+@property (nonatomic, readonly) double peakDecodeFPS;
+
 @property (nonatomic, readonly) double speedRatio;
 
 @property (nonatomic, readonly) double avgCPUPercent;   ///< 单核百分比
@@ -262,18 +272,7 @@ FOUNDATION_EXPORT NSString *BenchDecoderVersionDescription(void);
 @property (nonatomic, readonly) double footprintDeltaMB;
 @property (nonatomic, readonly) double footprintDeltaKBPerFrame;
 
-/**
- * 相对基准解码器的提升倍数（fps 之比）。
- *
- * 只在一批测试里指定了基准后才有意义，由调用方传入基准 fps。
- * 返回 0 表示无基准或无法计算。
- */
-- (double)relativeSpeedupAgainstFPS:(double)baselineFPS;
-
 + (instancetype)summaryWithRounds:(NSArray<BenchRoundMetrics *> *)rounds;
-
-/** 生成纯文本报告，便于复制粘贴给他人 */
-- (NSString *)textReportWithConfig:(nullable BenchRunConfig *)config;
 
 @end
 
