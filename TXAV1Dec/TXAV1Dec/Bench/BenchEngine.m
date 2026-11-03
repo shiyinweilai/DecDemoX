@@ -61,9 +61,12 @@
         _warmupRounds = 1;
         _skipFrames = 0;
         _threads = 0;
-        // 版本号取自实际要跑的那个 dylib，不用手填：多版本轮测时若靠人工标注，
-        // 极易出现「跑的是 1.4.3、标的是 1.4.2」，而这种错配从数据上看不出来。
-        _decoderName = BenchDecoderVersionDescription();
+        // 默认不填 decoderName：早期实现为了给这个字段一个默认值，在 init 里
+        // 调 BenchDecoderVersionDescription()，而它会顺着 preferredDecoder
+        // 把所有版本的 dylib 全部 dlopen 一遍。构造一个配置对象本该是纯内存操作，
+        // 不该有 I/O 和动态库加载副作用。名字由真正开跑时绑定解码器的人填
+        // （见 ViewController buildConfigForStream:）。
+        _decoderName = nil;
     }
     return self;
 }
@@ -71,6 +74,8 @@
 @end
 
 NSString *BenchDecoderVersionDescription(void) {
+    // 注意：本函数会加载动态库，只能在后台队列或确实需要展示版本名时调用，
+    // 不能出现在启动路径或配置对象的初始化路径里。
     BenchDecoder *decoder = [BenchDecoderLibrary preferredDecoder];
     if (!decoder) return @"txav1d（无可用版本）";
     return decoder.displayName;
@@ -456,7 +461,9 @@ NSString *BenchDecoderVersionDescription(void) {
     const NSUInteger skipFrames = config.skipFrames;
     const NSInteger threads = config.threads;
     const BenchSchedulePolicy schedulePolicy = config.schedulePolicy;
-    BenchDecoder *decoder = config.decoder ?: [BenchDecoderLibrary preferredDecoder];
+    // 不再在这里兜底调 preferredDecoder：那是主线程上的隐式 dlopen。
+    // 解码器必须由调用方从勾选结果里显式传入，缺失即视为配置错误。
+    BenchDecoder *decoder = config.decoder;
     NSString *streamPath = [config.streamPath copy];
 
     if (streamPath.length == 0) {
@@ -467,13 +474,10 @@ NSString *BenchDecoderVersionDescription(void) {
         return;
     }
 
-    // 没有可用解码器时立即失败：继续跑只会得到一串空结果，
-    // 让人误以为是性能问题而不是构建问题。
-    if (!decoder.isUsable) {
+    if (!decoder) {
         self.running = NO;
-        NSString *reason = decoder.loadError ?: @"未找到可用的解码器动态库";
         dispatch_async(dispatch_get_main_queue(), ^{
-            onCompletion(@[], reason);
+            onCompletion(@[], @"未选择解码器版本");
         });
         return;
     }
@@ -483,6 +487,25 @@ NSString *BenchDecoderVersionDescription(void) {
     dispatch_async(self.workQueue, ^{
         __strong typeof(weakSelf) self = weakSelf;
         if (!self) return;
+
+        // dlopen 放在后台队列：一个版本约几十毫秒，且 RTLD_NOW 会立即绑定
+        // 全部符号。放在主线程会让「点开始」到界面响应之间出现可感知的停顿。
+        if (![decoder loadIfNeeded]) {
+            self.running = NO;
+            NSString *reason = decoder.loadError
+                ?: [NSString stringWithFormat:@"解码器 %@ 加载失败", decoder.version];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                onCompletion(@[], reason);
+            });
+            return;
+        }
+
+        // 此刻 dlopen 已完成，displayName 才包含「库自报版本与目录名是否一致」
+        // 这项交叉校验。从这里到 onCompletion 之间有 dispatch 到主队列的屏障，
+        // 报告在主线程读取 config 时一定看到已写入的值。
+        if (config.decoderName.length == 0) {
+            config.decoderName = decoder.displayName;
+        }
 
         NSMutableArray<BenchRoundMetrics *> *rounds = [NSMutableArray array];
         NSString *fatalError = nil;
@@ -610,8 +633,9 @@ NSString *BenchDecoderVersionDescription(void) {
     [BenchSystemMetrics applySchedulePolicyToCurrentThread:schedulePolicy];
 
     // 解码器缺失说明构建产物里没有任何可用版本；直接失败并给出原因，
-    // 比拿一个空指针继续跑更容易定位问题。
-    if (!decoder.isUsable) {
+    // 比拿一个空指针继续跑更容易定位问题。这里再调一次 loadIfNeeded 是幂等的，
+    // 正常情况下在批次开始前已经加载过，只是让本函数单独被调用时也能自洽。
+    if (![decoder loadIfNeeded]) {
         os_unfair_lock_lock(&_sampleLock);
         self.samplingActive = NO;
         os_unfair_lock_unlock(&_sampleLock);

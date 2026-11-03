@@ -546,22 +546,21 @@
 #pragma mark - 解码器选择
 
 /**
- * 扫描 App 包内的解码器动态库并刷新选择状态。
+ * 扫描 App 包内的解码器版本并刷新选择状态。
  *
- * 版本列表来自构建产物（Frameworks 下的 libtxav1d_<版本>.dylib），
- * 不是硬编码清单，所以新增版本后重新编译即自动出现。
+ * 只做目录扫描（scanDecoders），不加载任何 dylib：版本名、构建时间都来自
+ * 文件属性，界面立刻就能渲染。真正的 dlopen 推迟到点「开始测试」时，
+ * 由引擎在后台队列按需加载被勾选的那几个版本。
  */
 - (void)reloadDecoders {
-    self.decoders = [BenchDecoderLibrary availableDecoders];
+    self.decoders = [BenchDecoderLibrary scanDecoders];
 
-    // 默认只勾选第一个可用版本：全选会让首次测试的耗时成倍增长，
-    // 而绝大多数时候用户只是想测最新版本。
+    // 默认只勾选最新版本：全选会让首次测试的耗时成倍增长，
+    // 而绝大多数时候用户只是想测最新版本。这里按版本名取第一项即可，
+    // 不再依赖加载结果——扫描阶段本来也还没有加载任何库。
     [self.selectedDecoders removeAllObjects];
-    for (BenchDecoder *decoder in self.decoders) {
-        if (decoder.isUsable) {
-            [self.selectedDecoders addObject:decoder];
-            break;
-        }
+    if (self.decoders.count > 0) {
+        [self.selectedDecoders addObject:self.decoders.firstObject];
     }
 
     [self refreshDecoderPickerDisplay];
@@ -599,9 +598,10 @@
         if (!self) return;
         if (index < 0 || index >= (NSInteger)self.decoders.count) return;
         BenchDecoder *decoder = self.decoders[index];
-        if (!decoder.isUsable) {
-            // 不可用项仍可点，但只给解释不改变选择：
-            // 直接禁点会让用户以为界面卡了，点了没反应也说不清原因。
+        if (decoder.isLoaded && !decoder.isUsable) {
+            // 只对「已确认加载失败」的版本拦住点击：这类版本真跑不起来，
+            // 让用户选上只会在开始时失败。尚未加载的版本一律允许勾选，
+            // 因为加载被推迟到开跑时才发生，此刻无从判断好坏。
             [self showAlertWithTitle:[NSString stringWithFormat:@"%@ 不可用", decoder.version]
                              message:decoder.loadError ?: @"未知原因"];
             return;
@@ -612,15 +612,16 @@
     panel.onSelectAll = ^{
         __strong typeof(weakSelf) self = weakSelf;
         if (!self) return;
-        NSUInteger usableCount = 0;
+        NSUInteger selectableCount = 0;
         for (BenchDecoder *decoder in self.decoders) {
-            if (decoder.isUsable) usableCount++;
+            if (!(decoder.isLoaded && !decoder.isUsable)) selectableCount++;
         }
-        const BOOL allSelected = (self.selectedDecoders.count == usableCount && usableCount > 0);
+        const BOOL allSelected = (self.selectedDecoders.count == selectableCount && selectableCount > 0);
         [self.selectedDecoders removeAllObjects];
         if (!allSelected) {
             for (BenchDecoder *decoder in self.decoders) {
-                if (decoder.isUsable) [self.selectedDecoders addObject:decoder];
+                // 已确认加载失败的版本不参与全选：它们注定跑不起来
+                if (!(decoder.isLoaded && !decoder.isUsable)) [self.selectedDecoders addObject:decoder];
             }
         }
         [self refreshDecoderPickerDisplay];
@@ -635,7 +636,7 @@
         if (!self) return;
         [self.selectedDecoders removeAllObjects];
         for (BenchDecoder *decoder in self.decoders) {
-            if (decoder.isUsable) {
+            if (!(decoder.isLoaded && !decoder.isUsable)) {
                 [self.selectedDecoders addObject:decoder];
                 break;
             }
@@ -652,19 +653,22 @@
     };
 }
 
-/** 把解码器列表映射成浮层行数据，不可用版本带上原因并置灰 */
+/** 把解码器列表映射成浮层行数据，确认加载失败的版本带上原因并置灰 */
 - (NSArray<BenchMultiSelectItem *> *)decoderPickerItems {
     NSMutableArray<BenchMultiSelectItem *> *items = [NSMutableArray array];
     for (BenchDecoder *decoder in self.decoders) {
+        const BOOL failed = (decoder.isLoaded && !decoder.isUsable);
         NSString *detail;
-        if (decoder.isUsable) {
-            detail = decoder.buildStamp.length > 0 ? decoder.buildStamp : @"已加载";
-        } else {
+        if (failed) {
             detail = decoder.loadError ?: @"不可用";
+        } else {
+            // 未加载也显示构建时间：这是判断「这份库是不是我刚编的那个」的依据，
+            // 与是否已 dlopen 无关，扫描阶段就已经拿到了。
+            detail = decoder.buildStamp.length > 0 ? decoder.buildStamp : @"待加载";
         }
         BenchMultiSelectItem *item = [BenchMultiSelectItem itemWithTitle:decoder.version detail:detail];
         item.selected = [self.selectedDecoders containsObject:decoder];
-        item.enabled = decoder.isUsable;
+        item.enabled = !failed;
         [items addObject:item];
     }
     return items;
@@ -1038,7 +1042,10 @@
     // 解码器实例与展示名一起绑定：名称取自实际加载的那个库，
     // 而不是用户填的文本，杜绝"跑 A 标 B"。
     config.decoder = decoder;
-    config.decoderName = decoder.displayName;
+    // 这里不填 decoderName：此刻库可能还没 dlopen（加载推迟到引擎后台队列），
+    // displayName 里「库自报版本与目录名不一致」这条交叉校验信息还拿不到。
+    // 留空由引擎在加载成功后回填，见 BenchEngine 的 applyResolvedDecoderName。
+    config.decoderName = nil;
 
     // 输入 0 表示跑满整个码流
     if (self.framesField.textField.text.integerValue == 0) {
@@ -1681,7 +1688,10 @@
     if ([[NSProcessInfo processInfo].arguments containsObject:@"--all-decoders"]) {
         [self.selectedDecoders removeAllObjects];
         for (BenchDecoder *decoder in self.decoders) {
-            if (decoder.isUsable) [self.selectedDecoders addObject:decoder];
+            // 这里不能再用 isUsable 过滤：扫描阶段没有 dlopen，全部都是未加载状态。
+            // 直接全选，由引擎开跑时逐个加载；加载失败的组合会被记进
+            // failedStreamNames，反而能覆盖「某个库坏了」这种情况。
+            [self.selectedDecoders addObject:decoder];
         }
         [self refreshDecoderPickerDisplay];
         append(@"已全选 %lu 个解码器", (unsigned long)self.selectedDecoders.count);

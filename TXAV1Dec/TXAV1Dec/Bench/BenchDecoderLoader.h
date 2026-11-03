@@ -28,7 +28,15 @@ NS_ASSUME_NONNULL_BEGIN
 #pragma mark - 单个解码器版本
 
 /**
- * 一个已加载的解码器版本。
+ * 一个解码器版本。
+ *
+ * 生命周期分两段：
+ *   1. 扫描阶段（scanDecoders）只读目录与文件属性，建立轻量对象，不碰 dlopen；
+ *   2. 加载阶段（loadIfNeeded）在真正要跑测试时才对这一个版本 dlopen + 解析符号。
+ *
+ * 这么拆的原因是启动成本：早期实现把两件事揉在 availableDecoders 里，
+ * 界面一出现就要把 Frameworks 下所有版本全部 dlopen(RTLD_NOW) 一遍，
+ * 而用户往往只想测其中一个。启动只需要「有哪些版本」，不需要「把库装进来」。
  *
  * 持有 dlopen 句柄，dealloc 时自动 dlclose。句柄必须活到该版本所有测试结束，
  * 否则函数指针会立即失效。
@@ -50,11 +58,34 @@ NS_ASSUME_NONNULL_BEGIN
 /** 用于界面与报告展示的名称，例如 "txav1d143" / "dav1d151" */
 @property (nonatomic, copy, readonly) NSString *displayName;
 
-/** 加载失败的原因，成功时为 nil */
+/** 加载失败的原因，成功时为 nil；未加载时为 nil */
 @property (nonatomic, copy, readonly, nullable) NSString *loadError;
 
-/** 是否可用：加载成功且关键符号齐全 */
+/**
+ * 是否已经加载完成（无论成功还是失败）。
+ *
+ * 界面用它区分「还没试过」和「试过但不可用」：未加载的版本在列表里
+ * 显示构建时间且可以勾选，加载失败的版本才置灰并给出原因。
+ */
+@property (nonatomic, readonly) BOOL isLoaded;
+
+/**
+ * 是否可执行测试。
+ *
+ * 只有已加载且符号齐全时才为真。注意本属性不会触发加载：
+ * 界面上的可用性判断一律用 isLoaded / loadIfNeeded，不能靠它。
+ */
 @property (nonatomic, readonly) BOOL isUsable;
+
+/**
+ * 按需加载本版本的动态库，已加载（含失败）则直接返回缓存结果。
+ *
+ * 线程安全，可从后台队列调用。dlopen 在真机上约几十毫秒，
+ * 因此必须在后台队列执行，不要放在主线程的界面构建路径里。
+ *
+ * @return 是否可用
+ */
+- (BOOL)loadIfNeeded;
 
 /**
  * 执行一次完整解码测速。
@@ -82,10 +113,18 @@ NS_ASSUME_NONNULL_BEGIN
 @interface BenchDecoderLibrary : NSObject
 
 /**
- * 扫描并加载所有可用的解码器版本，按版本号降序排列（最新在前）。
+ * 扫描出所有解码器版本，按版本号降序排列（最新在前）。
  *
- * 加载是惰性的：这里只做 dlopen + 符号解析，不会执行解码。
- * 单个版本加载失败不会影响其他版本，失败原因记录在该对象的 loadError 上。
+ * 只读 Frameworks 目录与文件属性，不执行 dlopen —— 启动路径用它，
+ * 成本是一次目录遍历，与版本数量无关。返回的对象需要时再逐个加载。
+ */
++ (NSArray<BenchDecoder *> *)scanDecoders;
+
+/**
+ * 扫描并立即加载所有版本。
+ *
+ * 仅在确实需要「所有版本都可用性已知」的场景使用（如自测全版本覆盖）。
+ * 界面启动路径不得调用，否则又退回到启动期全量 dlopen。
  */
 + (NSArray<BenchDecoder *> *)availableDecoders;
 

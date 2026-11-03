@@ -6,6 +6,7 @@
 #import "BenchDecoderLoader.h"
 
 #include <dlfcn.h>
+#include <os/lock.h>
 
 #pragma mark - 函数指针签名
 
@@ -23,12 +24,31 @@ typedef const char *(*VersionFn)(void);
 @property (nonatomic, copy, readwrite) NSString *buildStamp;
 @property (nonatomic, copy, readwrite, nullable) NSString *loadError;
 
+/// 只建立对象并填元信息，不 dlopen，供扫描路径使用
+- (instancetype)initPreparedWithVersion:(NSString *)version path:(NSString *)path;
+- (BOOL)loadWithVersion:(NSString *)version
+                   path:(NSString *)path
+                  error:(NSString **)error;
+
 @end
 
 @implementation BenchDecoder {
     void *_handle;
     BenchFn _benchFn;
     FreeResultFn _freeResultFn;
+
+    // 加载状态：0 未尝试、1 成功、-1 失败（失败也缓存，避免反复 dlopen 同一个坏库）
+    NSInteger _loadState;
+    os_unfair_lock _loadLock;
+}
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _loadLock = OS_UNFAIR_LOCK_INIT;
+        _loadState = 0;
+    }
+    return self;
 }
 
 - (void)dealloc {
@@ -38,6 +58,13 @@ typedef const char *(*VersionFn)(void);
         dlclose(_handle);
         _handle = NULL;
     }
+}
+
+- (BOOL)isLoaded {
+    os_unfair_lock_lock(&_loadLock);
+    const BOOL loaded = (_loadState != 0);
+    os_unfair_lock_unlock(&_loadLock);
+    return loaded;
 }
 
 /// 去掉点号后的版本形式，用于跨命名风格比较。
@@ -66,12 +93,35 @@ typedef const char *(*VersionFn)(void);
 }
 
 - (BOOL)isUsable {
-    return self.loadError == nil && _handle != NULL && _benchFn != NULL;
+    os_unfair_lock_lock(&_loadLock);
+    const BOOL usable = (_loadState == 1 && _handle != NULL && _benchFn != NULL);
+    os_unfair_lock_unlock(&_loadLock);
+    return usable;
+}
+
+- (BOOL)loadIfNeeded {
+    // 持锁完成整段加载：锁是每个对象私有的，只会串行同一个版本的并发调用，
+    // 不同版本之间互不阻塞。若改成先放锁再 dlopen，两个线程会重复加载同一个库，
+    // 后完成的那次会覆盖 _handle 并泄漏前一个句柄。
+    os_unfair_lock_lock(&_loadLock);
+    if (_loadState != 0) {
+        const BOOL cached = (_loadState == 1);
+        os_unfair_lock_unlock(&_loadLock);
+        return cached;
+    }
+
+    NSString *error = nil;
+    const BOOL ok = [self loadWithVersion:self.version path:self.libraryPath error:&error];
+    // 失败也记入状态：坏库没有必要每次调用都重试一遍 dlopen，
+    // 真要人工修复（替换 dylib）需要重启 App，缓存不会掩盖问题。
+    _loadState = ok ? 1 : -1;
+    os_unfair_lock_unlock(&_loadLock);
+    return ok;
 }
 
 - (int)runBenchWithConfig:(const Txav1dBenchConfig *)config
                    result:(Txav1dBenchResult *)result {
-    if (!self.isUsable || !_benchFn) return TXAV1D_BENCH_ERROR;
+    if (![self loadIfNeeded]) return TXAV1D_BENCH_ERROR;
     return _benchFn(config, result);
 }
 
@@ -83,35 +133,48 @@ typedef const char *(*VersionFn)(void);
     }
 }
 
-@end
-
 #pragma mark - 内部构造
 
-@interface BenchDecoder (Internal)
+/// 只建立对象并填充元信息（版本名、路径、构建时间），不执行 dlopen。
+/// 扫描路径专用：这些字段全部来自文件系统，读一次目录属性就够了。
+- (instancetype)initPreparedWithVersion:(NSString *)version path:(NSString *)path {
+    self = [self init];
+    if (!self) return nil;
 
-- (BOOL)loadWithVersion:(NSString *)version
-                   path:(NSString *)path
-                  error:(NSString **)error;
-
-@end
-
-@implementation BenchDecoder (Internal)
-
-- (BOOL)loadWithVersion:(NSString *)version
-                   path:(NSString *)path
-                  error:(NSString **)error {
-    self.version = version;
-    self.libraryPath = path;
+    _version = [version copy];
+    _libraryPath = [path copy];
 
     NSDictionary *attrs = [NSFileManager.defaultManager attributesOfItemAtPath:path
-                                                                          error:NULL];
+                                                                        error:NULL];
     NSDate *mtime = attrs[NSFileModificationDate];
     if (mtime) {
         NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
         fmt.dateFormat = @"MM-dd HH:mm";
-        self.buildStamp = [fmt stringFromDate:mtime];
+        _buildStamp = [fmt stringFromDate:mtime];
     } else {
-        self.buildStamp = @"";
+        _buildStamp = @"";
+    }
+    return self;
+}
+
+- (BOOL)loadWithVersion:(NSString *)version
+                   path:(NSString *)path
+                  error:(NSString **)error {
+    // 扫描阶段已填过的不再重复取：自测等直接构造的路径会走到这里补齐
+    if (self.version.length == 0) self.version = version;
+    if (self.libraryPath.length == 0) self.libraryPath = path;
+
+    if (self.buildStamp.length == 0) {
+        NSDictionary *attrs = [NSFileManager.defaultManager attributesOfItemAtPath:path
+                                                                             error:NULL];
+        NSDate *mtime = attrs[NSFileModificationDate];
+        if (mtime) {
+            NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
+            fmt.dateFormat = @"MM-dd HH:mm";
+            self.buildStamp = [fmt stringFromDate:mtime];
+        } else {
+            self.buildStamp = @"";
+        }
     }
 
     // RTLD_LOCAL 是这里的要点：默认的 RTLD_GLOBAL 会把符号并入全局符号表，
@@ -196,7 +259,7 @@ typedef const char *(*VersionFn)(void);
     return out;
 }
 
-+ (NSArray<BenchDecoder *> *)availableDecoders {
++ (NSArray<BenchDecoder *> *)scanDecoders {
     NSString *dir = [self frameworksDirectory];
     NSArray<NSString *> *names = [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir
                                                                                   error:NULL];
@@ -216,12 +279,10 @@ typedef const char *(*VersionFn)(void);
         if (version.length == 0) continue;
 
         NSString *path = [dir stringByAppendingPathComponent:name];
-        BenchDecoder *decoder = [[BenchDecoder alloc] init];
-        NSString *error = nil;
-        [decoder loadWithVersion:version path:path error:&error];
-        // 加载失败也收进列表：让用户在界面上看到「某版本不可用」，
-        // 比静默消失更容易发现问题。
-        [decoders addObject:decoder];
+        // 关键：这里只读文件属性，不 dlopen。启动路径的开销从
+        // 「N 次符号绑定」降到「一次目录遍历」。
+        BenchDecoder *decoder = [[BenchDecoder alloc] initPreparedWithVersion:version path:path];
+        if (decoder) [decoders addObject:decoder];
     }
 
     [decoders sortUsingComparator:^NSComparisonResult(BenchDecoder *a, BenchDecoder *b) {
@@ -230,9 +291,21 @@ typedef const char *(*VersionFn)(void);
     return decoders;
 }
 
++ (NSArray<BenchDecoder *> *)availableDecoders {
+    NSArray<BenchDecoder *> *decoders = [self scanDecoders];
+    for (BenchDecoder *decoder in decoders) {
+        // 加载失败也保留在列表里：让用户在界面上看到「某版本不可用」，
+        // 比静默消失更容易发现问题。
+        [decoder loadIfNeeded];
+    }
+    return decoders;
+}
+
 + (nullable BenchDecoder *)preferredDecoder {
-    for (BenchDecoder *decoder in [self availableDecoders]) {
-        if (decoder.isUsable) return decoder;
+    // 按版本降序逐个尝试，命中第一个可用的就停：不加载全量，
+    // 因为「最新可用版本」在绝大多数时候就是第一个。
+    for (BenchDecoder *decoder in [self scanDecoders]) {
+        if ([decoder loadIfNeeded]) return decoder;
     }
     return nil;
 }
