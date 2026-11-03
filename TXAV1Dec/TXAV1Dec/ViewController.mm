@@ -189,10 +189,31 @@
 @property (nonatomic, strong) BenchSegmentRow *threadSegment;
 @property (nonatomic, strong) BenchSegmentRow *affinitySegment;
 
+/**
+ * 命令行指定的线程数，-1 表示未指定、按界面分段控件取值。
+ *
+ * 界面分段只提供 0/1/2/4/8 五档，但自测需要扫 3、6、12 这类非档位值
+ * 来定位线程数拐点。早期实现是把 --threads 反查成分段索引，传 6 时
+ * indexOfObject 找不到就静默保持默认，表现成「命令行改不了线程」。
+ * 这里用独立属性承载任意值，不复用分段控件。
+ */
+@property (nonatomic, assign) NSInteger threadsOverride;
+
 // 解码器选择：与码流一样用弹出多选，版本列表来自构建产物而非硬编码
 @property (nonatomic, strong) BenchStreamPickerRow *decoderPickerRow;
 @property (nonatomic, strong) NSArray<BenchDecoder *> *decoders;
 @property (nonatomic, strong) NSMutableArray<BenchDecoder *> *selectedDecoders;
+
+/**
+ * 当前弹出的多选面板。
+ *
+ * 面板改为「不自动收起」后，选中态变化不再靠「关掉再弹一个」来刷新，
+ * 而是由控制器持有面板引用、原地 reload。因此这两个引用同时承担两件事：
+ * 判断面板是否已经打开（避免重复叠加），以及给 toggle 回调提供刷新入口。
+ * 面板关闭时通过 onDismiss 置空。
+ */
+@property (nonatomic, strong, nullable) BenchMultiSelectPanel *streamPanel;
+@property (nonatomic, strong, nullable) BenchMultiSelectPanel *decoderPanel;
 
 // 操作
 @property (nonatomic, strong) UIButton *startButton;
@@ -559,50 +580,59 @@
 - (void)decoderPickerTapped {
     [self dismissKeyboard];
     if (self.engine.isRunning) return;
+    if (self.decoderPanel) return;
 
-    // 第一行是标题说明，不参与选择；版本全部不可用时给出明确指引，
-    // 否则用户只会看到空列表，不知道是构建失败还是没放库。
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"选择解码器版本"
-                                                                  message:@"可多选，将依次跑完每个版本的每个码流"
-                                                           preferredStyle:UIAlertControllerStyleActionSheet];
+    NSArray<BenchMultiSelectItem *> *items = [self decoderPickerItems];
 
-    if (self.decoders.count == 0) {
-        [sheet addAction:[UIAlertAction actionWithTitle:@"未找到解码器，请检查构建"
-                                                  style:UIAlertActionStyleCancel
-                                                handler:nil]];
-    }
+    __weak typeof(self) weakSelf = self;
+    BenchMultiSelectPanel *panel =
+        [BenchMultiSelectPanel presentInView:self.view
+                                       title:@"选择解码器版本"
+                                     message:self.decoders.count == 0
+                                                 ? @"未找到解码器，请检查构建产物"
+                                                 : @"可多选，再次点击已选项即可取消"
+                                       items:items];
+    self.decoderPanel = panel;
 
-    for (BenchDecoder *decoder in self.decoders) {
-        const BOOL selected = [self.selectedDecoders containsObject:decoder];
-        // 不可用的版本仍然列出但标注原因：静默隐藏会让人误以为构建漏了某个版本，
-        // 实际是那个版本的库有问题。
-        NSString *title;
-        if (decoder.isUsable) {
-            title = [NSString stringWithFormat:@"%@ %@  ·  %@",
-                     selected ? @"✓" : @"　",
-                     decoder.version,
-                     decoder.buildStamp.length > 0 ? decoder.buildStamp : @"已加载"];
-        } else {
-            title = [NSString stringWithFormat:@"✕ %@  ·  %@",
-                     decoder.version,
-                     decoder.loadError ?: @"不可用"];
+    panel.onToggleItem = ^(NSInteger index) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        if (index < 0 || index >= (NSInteger)self.decoders.count) return;
+        BenchDecoder *decoder = self.decoders[index];
+        if (!decoder.isUsable) {
+            // 不可用项仍可点，但只给解释不改变选择：
+            // 直接禁点会让用户以为界面卡了，点了没反应也说不清原因。
+            [self showAlertWithTitle:[NSString stringWithFormat:@"%@ 不可用", decoder.version]
+                             message:decoder.loadError ?: @"未知原因"];
+            return;
         }
-        UIAlertAction *action = [UIAlertAction actionWithTitle:title
-                                                         style:UIAlertActionStyleDefault
-                                                       handler:^(UIAlertAction *a) {
-            if (!decoder.isUsable) {
-                [self showAlertWithTitle:[NSString stringWithFormat:@"%@ 不可用", decoder.version]
-                                 message:decoder.loadError ?: @"未知原因"];
-                return;
-            }
-            [self toggleDecoder:decoder];
-        }];
-        [sheet addAction:action];
-    }
+        [self toggleDecoder:decoder];
+    };
 
-    [sheet addAction:[UIAlertAction actionWithTitle:@"仅选最新版本"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction *a) {
+    panel.onSelectAll = ^{
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        NSUInteger usableCount = 0;
+        for (BenchDecoder *decoder in self.decoders) {
+            if (decoder.isUsable) usableCount++;
+        }
+        const BOOL allSelected = (self.selectedDecoders.count == usableCount && usableCount > 0);
+        [self.selectedDecoders removeAllObjects];
+        if (!allSelected) {
+            for (BenchDecoder *decoder in self.decoders) {
+                if (decoder.isUsable) [self.selectedDecoders addObject:decoder];
+            }
+        }
+        [self refreshDecoderPickerDisplay];
+        [self updateStartButtonState];
+        [self.decoderPanel reloadWithItems:[self decoderPickerItems]];
+    };
+
+    // 「仅选最新版本」在对比场景很常用：全选会让耗时成倍增长，
+    // 而多数时候只想先看最新版的表现，所以保留成一个独立快捷动作。
+    [panel setExtraActionTitle:@"仅选最新" handler:^{
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
         [self.selectedDecoders removeAllObjects];
         for (BenchDecoder *decoder in self.decoders) {
             if (decoder.isUsable) {
@@ -612,29 +642,32 @@
         }
         [self refreshDecoderPickerDisplay];
         [self updateStartButtonState];
-    }]];
+        [self.decoderPanel reloadWithItems:[self decoderPickerItems]];
+    }];
 
-    // 「全选」在对比场景里最常用：一次性把所有版本都跑一遍才能横向对比
-    [sheet addAction:[UIAlertAction actionWithTitle:@"全选（对比所有版本）"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction *a) {
-        [self.selectedDecoders removeAllObjects];
-        for (BenchDecoder *decoder in self.decoders) {
-            if (decoder.isUsable) [self.selectedDecoders addObject:decoder];
+    panel.onDismiss = ^{
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        self.decoderPanel = nil;
+    };
+}
+
+/** 把解码器列表映射成浮层行数据，不可用版本带上原因并置灰 */
+- (NSArray<BenchMultiSelectItem *> *)decoderPickerItems {
+    NSMutableArray<BenchMultiSelectItem *> *items = [NSMutableArray array];
+    for (BenchDecoder *decoder in self.decoders) {
+        NSString *detail;
+        if (decoder.isUsable) {
+            detail = decoder.buildStamp.length > 0 ? decoder.buildStamp : @"已加载";
+        } else {
+            detail = decoder.loadError ?: @"不可用";
         }
-        [self refreshDecoderPickerDisplay];
-        [self updateStartButtonState];
-    }]];
-
-    [sheet addAction:[UIAlertAction actionWithTitle:@"完成"
-                                              style:UIAlertActionStyleCancel
-                                            handler:nil]];
-
-    if (sheet.popoverPresentationController) {
-        sheet.popoverPresentationController.sourceView = self.decoderPickerRow;
-        sheet.popoverPresentationController.sourceRect = self.decoderPickerRow.bounds;
+        BenchMultiSelectItem *item = [BenchMultiSelectItem itemWithTitle:decoder.version detail:detail];
+        item.selected = [self.selectedDecoders containsObject:decoder];
+        item.enabled = decoder.isUsable;
+        [items addObject:item];
     }
-    [self presentViewController:sheet animated:YES completion:nil];
+    return items;
 }
 
 - (void)toggleDecoder:(BenchDecoder *)decoder {
@@ -653,12 +686,8 @@
     [self refreshDecoderPickerDisplay];
     [self updateStartButtonState];
 
-    // 选择变化后重新弹出，支持连续勾选多个版本
-    if (self.presentedViewController) {
-        [self dismissViewControllerAnimated:NO completion:^{
-            [self decoderPickerTapped];
-        }];
-    }
+    // 原地刷新，面板保持打开，支持连续勾选多个版本
+    [self.decoderPanel reloadWithItems:[self decoderPickerItems]];
 }
 
 #pragma mark - 码流选择
@@ -761,55 +790,62 @@
     [self dismissKeyboard];
     if (self.engine.isRunning) return;
 
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"选择测试码流"
-                                                                  message:@"可多选，批量测试会依次跑完每个码流"
-                                                           preferredStyle:UIAlertControllerStyleActionSheet];
+    // 已经打开时不重复叠加：面板不再自动关闭，连续点触发行只会把面板
+    // 叠成一层又一层，最后要连点多次空白才能全部收掉。
+    if (self.streamPanel) return;
 
-    if (self.streams.count == 0) {
-        [sheet addAction:[UIAlertAction actionWithTitle:@"未找到码流文件"
-                                                  style:UIAlertActionStyleCancel
-                                                handler:nil]];
-    }
-
-    // 每个码流一个可切换的动作，勾选态用前缀符号表达，
-    // 比自建多选列表更省代码，也天然支持码流数量变化。
-    for (BenchStream *stream in self.streams) {
-        const BOOL selected = [self.selectedStreams containsObject:stream];
-        NSString *title = [NSString stringWithFormat:@"%@ %@  ·  %@",
-                           selected ? @"✓" : @"　",
-                           stream.name,
-                           stream.sizeDescription];
-        __weak typeof(self) weakSelf = self;
-        [sheet addAction:[UIAlertAction actionWithTitle:title
-                                                 style:UIAlertActionStyleDefault
-                                               handler:^(UIAlertAction *action) {
-            __strong typeof(weakSelf) self = weakSelf;
-            if (!self) return;
-            [self toggleStream:stream];
-        }]];
-    }
+    NSArray<BenchMultiSelectItem *> *items = [self streamPickerItems];
+    const BOOL empty = (self.streams.count == 0);
 
     __weak typeof(self) weakSelf = self;
-    [sheet addAction:[UIAlertAction actionWithTitle:@"全选"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction *action) {
+    BenchMultiSelectPanel *panel =
+        [BenchMultiSelectPanel presentInView:self.view
+                                       title:@"选择测试码流"
+                                     message:empty ? @"未找到码流文件，请检查 Documents/Streams"
+                                                   : @"可多选，再次点击已选项即可取消"
+                                       items:items];
+    self.streamPanel = panel;
+
+    panel.onToggleItem = ^(NSInteger index) {
         __strong typeof(weakSelf) self = weakSelf;
         if (!self) return;
-        self.selectedStreams = [self.streams mutableCopy];
+        if (index < 0 || index >= (NSInteger)self.streams.count) return;
+        [self toggleStream:self.streams[index]];
+    };
+
+    panel.onSelectAll = ^{
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        // 已全选时再点「全选」变成全不选：面板不会自动关闭，
+        // 这个按钮成了唯一的批量入口，必须能反向操作，否则清空只能逐项点。
+        const BOOL allSelected = (self.selectedStreams.count == self.streams.count
+                                  && self.streams.count > 0);
+        [self.selectedStreams removeAllObjects];
+        if (!allSelected) {
+            [self.selectedStreams addObjectsFromArray:self.streams];
+        }
         [self refreshStreamPickerDisplay];
         [self updateStartButtonState];
-    }]];
+        [self.streamPanel reloadWithItems:[self streamPickerItems]];
+    };
 
-    [sheet addAction:[UIAlertAction actionWithTitle:@"完成"
-                                              style:UIAlertActionStyleCancel
-                                            handler:nil]];
+    panel.onDismiss = ^{
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        self.streamPanel = nil;
+    };
+}
 
-    // iPad 上 action sheet 必须有锚点，否则会崩
-    if (sheet.popoverPresentationController) {
-        sheet.popoverPresentationController.sourceView = self.streamPickerRow;
-        sheet.popoverPresentationController.sourceRect = self.streamPickerRow.bounds;
+/** 把当前码流列表映射成浮层行数据，选中态取自 selectedStreams */
+- (NSArray<BenchMultiSelectItem *> *)streamPickerItems {
+    NSMutableArray<BenchMultiSelectItem *> *items = [NSMutableArray array];
+    for (BenchStream *stream in self.streams) {
+        BenchMultiSelectItem *item = [BenchMultiSelectItem itemWithTitle:stream.name
+                                                                  detail:stream.sizeDescription];
+        item.selected = [self.selectedStreams containsObject:stream];
+        [items addObject:item];
     }
-    [self presentViewController:sheet animated:YES completion:nil];
+    return items;
 }
 
 - (void)toggleStream:(BenchStream *)stream {
@@ -828,12 +864,9 @@
     [self refreshStreamPickerDisplay];
     [self updateStartButtonState];
 
-    // 选择变化后重新弹出，让用户能连续勾选多个而不必反复点开
-    if (self.presentedViewController) {
-        [self dismissViewControllerAnimated:NO completion:^{
-            [self streamPickerTapped];
-        }];
-    }
+    // 原地刷新面板，不再关掉重开：重开会造成闪一下的观感，
+    // 用户也无法连续确认自己刚才点的是哪一项。
+    [self.streamPanel reloadWithItems:[self streamPickerItems]];
 }
 
 - (void)refreshStreamsTapped {
@@ -994,7 +1027,13 @@
     config.rounds = (NSUInteger)[self.roundsField integerValueWithFallback:3];
     config.warmupRounds = (NSUInteger)[self.warmupField integerValueWithFallback:1];
     config.skipFrames = (NSUInteger)MAX([self.skipField integerValueWithFallback:0], 0);
-    config.threads = [self threadCountFromSegment];
+    // 命令行给了线程数就优先用它：自测要扫非档位值（3/6/12）定位线程拐点，
+    // 分段控件只能表达 0/1/2/4/8，反查索引会静默落回默认档。
+    if (self.threadsOverride >= 0) {
+        config.threads = self.threadsOverride;
+    } else {
+        config.threads = [self threadCountFromSegment];
+    }
     config.schedulePolicy = [self schedulePolicyFromSegment];
     // 解码器实例与展示名一起绑定：名称取自实际加载的那个库，
     // 而不是用户填的文本，杜绝"跑 A 标 B"。
@@ -1066,6 +1105,13 @@
     self.decoderPickerRow.button.enabled = !running;
     self.streamPickerRow.button.enabled = !running;
     self.reportCopyButton.enabled = !running && self.reportText.length > 0;
+
+    // 开跑时收起仍打开的选择浮层：浮层是模态遮罩，不收起会盖住进度条和
+    // 结果面板，而开跑后也不允许再改选择（两个触发按钮已禁用）。
+    if (running) {
+        [self.streamPanel dismiss];
+        [self.decoderPanel dismiss];
+    }
 }
 
 - (void)updateStartButtonState {
@@ -1164,17 +1210,25 @@
     NSMutableArray<NSString *> *p95 = [NSMutableArray array];
     NSMutableArray<NSString *> *memory = [NSMutableArray array];
 
-    // 列头默认只放版本：同一轮测试的码流与参数是对齐的，码流名对每一列都一样，
+    // 列头只放版本：同一轮测试的码流与参数是对齐的，码流名对每一列都一样，
     // 重复 N 遍既不提供信息，还要占掉列头一半宽度、把版本名挤小。
-    // 只有同时勾了多个码流时才补上码流名——否则同一个版本会出现两列同名，
-    // 那两列数字必然不同，读者无从判断谁是谁，这种歧义比多一行更糟。
-    const BOOL needStreamInHeader = self.batchStreamCount > 1;
+    // 多码流时同一版本会出现多列，此时只追加序号区分（1.4.3 / 1.4.3 #2），
+    // 仍然不把码流名写进表头——条件是对齐的，具体是哪个码流由测试者自己知道。
+    NSCountedSet *nameCount = [NSCountedSet set];
+    for (BenchStreamResult *result in self.batchResults) {
+        [nameCount addObject:result.decoderDisplayName];
+    }
+    NSMutableDictionary<NSString *, NSNumber *> *nameSeen = [NSMutableDictionary dictionary];
 
     for (BenchStreamResult *result in self.batchResults) {
-        [headers addObject:needStreamInHeader
-            ? [NSString stringWithFormat:@"%@\n%@",
-               result.decoderDisplayName, result.streamDisplayName]
-            : result.decoderDisplayName];
+        NSString *base = result.decoderDisplayName;
+        NSString *header = base;
+        if ([nameCount countForObject:base] > 1) {
+            NSUInteger seen = ([nameSeen[base] unsignedIntegerValue] + 1);
+            nameSeen[base] = @(seen);
+            header = [NSString stringWithFormat:@"%@ #%lu", base, (unsigned long)seen];
+        }
+        [headers addObject:header];
         BenchSummary *s = result.summary;
         if (s.scoredCount == 0) {
             for (NSMutableArray *column in @[fps, mspf, cpu, jitter, p95, memory]) {
@@ -1228,12 +1282,28 @@
         NSMutableArray<NSString *> *lines = [NSMutableArray array];
 
         if (multi) {
-            // 与列头一致：单码流时码流名对每段都相同，不必重复；
-            // 多码流时必须带上，否则分不清这段明细属于哪个码流。
-            [lines addObject:self.batchStreamCount > 1
-                ? [NSString stringWithFormat:@"%@ · %@",
-                   result.decoderDisplayName, result.streamDisplayName]
-                : result.decoderDisplayName];
+            // 与列头一致，不写码流名。多码流时同一版本会出现多段，
+            // 此时用与表头相同的序号标记，保证两处能对上号。
+            NSUInteger sameNameCount = 0;
+            for (BenchStreamResult *other in self.batchResults) {
+                if ([other.decoderDisplayName isEqualToString:result.decoderDisplayName]) {
+                    sameNameCount++;
+                }
+            }
+            if (sameNameCount > 1) {
+                // 序号按出现顺序累加，与表头用的是同一份批次顺序
+                NSUInteger ordinal = 0;
+                for (BenchStreamResult *other in self.batchResults) {
+                    if (other == result) break;
+                    if ([other.decoderDisplayName isEqualToString:result.decoderDisplayName]) {
+                        ordinal++;
+                    }
+                }
+                [lines addObject:[NSString stringWithFormat:@"%@ #%lu",
+                                  result.decoderDisplayName, (unsigned long)(ordinal + 1)]];
+            } else {
+                [lines addObject:result.decoderDisplayName];
+            }
         }
 
         if (s.scoredCount == 0) {
@@ -1342,7 +1412,6 @@
         };
 
         appendPadded(@"版本", 10);
-        appendPadded(@"码流", 20);
         appendPadded(@"fps", 9);
         appendPadded(@"ms/f", 9);
         appendPadded(@"CPU%", 9);
@@ -1351,11 +1420,12 @@
         appendPadded(@"净内存MB", 11);
         [text appendString:@"\n"];
 
+        // 报告里不放码流名：同一批测试的条件是对齐的，码流名对每行都一样，
+        // 逐行重复既不提供信息，还挤掉指标列的宽度。
         for (BenchStreamResult *result in self.batchResults) {
             BenchSummary *s = result.summary;
             if (s.scoredCount == 0) continue;
             appendPadded(result.decoderDisplayName, 10);
-            appendPadded(result.streamDisplayName, 20);
             appendPadded([NSString stringWithFormat:@"%.2f", s.decodeFPS], 9);
             appendPadded([NSString stringWithFormat:@"%.3f", s.avgFrameMs], 9);
             appendPadded([NSString stringWithFormat:@"%.2f", s.cpuSharePercent], 9);
@@ -1388,7 +1458,13 @@
                 BenchSummary *baseline = rows.lastObject.summary;
                 if (baseline.scoredCount == 0 || baseline.decodeFPS <= 0) continue;
 
-                [text appendFormat:@"\n--- %@ ---\n", rows.lastObject.streamDisplayName];
+                // 不写码流名：同一批测试条件对齐，读者只需要看版本之间的差异。
+                // 只有真的勾了多个码流时才标出来，否则同名两段无法区分。
+                if (self.batchStreamCount > 1) {
+                    [text appendFormat:@"\n--- %@ ---\n", rows.lastObject.streamDisplayName];
+                } else {
+                    [text appendString:@"\n"];
+                }
                 appendPadded(@"版本", 10);
                 appendPadded(@"fps", 9);
                 appendPadded(@"fps变化", 11);
@@ -1426,8 +1502,27 @@
 
         [text appendString:@"\n---------- 逐组合明细 ----------\n"];
         for (BenchStreamResult *result in self.batchResults) {
-            [text appendFormat:@"\n--- %@ / %@ ---\n",
-                result.decoderDisplayName, result.streamDisplayName];
+            // 不写码流名：同一批测试条件对齐，读者只需要区分版本。
+            // 多码流导致同名重复时，用序号标记到与上表一致。
+            NSUInteger sameNameCount = 0;
+            for (BenchStreamResult *other in self.batchResults) {
+                if ([other.decoderDisplayName isEqualToString:result.decoderDisplayName]) {
+                    sameNameCount++;
+                }
+            }
+            NSString *detailTitle = result.decoderDisplayName;
+            if (sameNameCount > 1) {
+                NSUInteger ordinal = 0;
+                for (BenchStreamResult *other in self.batchResults) {
+                    if (other == result) break;
+                    if ([other.decoderDisplayName isEqualToString:result.decoderDisplayName]) {
+                        ordinal++;
+                    }
+                }
+                detailTitle = [NSString stringWithFormat:@"%@ #%lu",
+                               result.decoderDisplayName, (unsigned long)(ordinal + 1)];
+            }
+            [text appendFormat:@"\n--- %@ ---\n", detailTitle];
             BenchSummary *s = result.summary;
             [text appendFormat:@"单帧 %.4f ms  P95 %.4f ms  fps %.2f  %@\n",
                 s.avgFrameMs,
@@ -1611,6 +1706,7 @@
     NSUInteger framesIndex = [args indexOfObject:@"--frames"];
     NSUInteger threadsIndex = [args indexOfObject:@"--threads"];
     NSUInteger policyIndex = [args indexOfObject:@"--policy"];
+    NSUInteger roundsIndex = [args indexOfObject:@"--rounds"];
 
     [self.batchResults removeAllObjects];
     [self.failedStreamNames removeAllObjects];
@@ -1631,12 +1727,19 @@
     // 自测固定用轻量参数，避免真机上跑太久
     self.framesField.textField.text = framesIndex != NSNotFound && framesIndex + 1 < args.count
         ? args[framesIndex + 1] : @"200";
-    self.roundsField.textField.text = @"2";
+    // 轮次同样可覆盖：短跑验证用默认 2 轮，稳定性对比需要更多轮次
+    self.roundsField.textField.text = roundsIndex != NSNotFound && roundsIndex + 1 < args.count
+        ? args[roundsIndex + 1] : @"2";
     self.warmupField.textField.text = @"1";
+    // 线程数直接采用命令行原值，不再反查分段索引。
+    // 旧实现用 @[@0,@1,@2,@4,@8] 反查，--threads 6 这类非档位值会 indexOfObject
+    // 返回 NSNotFound 而被丢弃，线程数静默落回默认值，看起来就是「命令行改不了线程」。
     if (threadsIndex != NSNotFound && threadsIndex + 1 < args.count) {
-        NSUInteger threads = (NSUInteger)[args[threadsIndex + 1] integerValue];
+        self.threadsOverride = MAX((NSInteger)[args[threadsIndex + 1] integerValue], 0);
+        // 若恰好是档位值，顺手同步界面，方便截图与人工核对；
+        // 非档位值不同步，避免把界面显示成错误的档位。
         NSArray<NSNumber *> *mapping = @[@0, @1, @2, @4, @8];
-        NSUInteger segment = [mapping indexOfObject:@(threads)];
+        NSUInteger segment = [mapping indexOfObject:@(self.threadsOverride)];
         if (segment != NSNotFound) {
             self.threadSegment.segmentedControl.selectedSegmentIndex = (NSInteger)segment;
         }
@@ -1649,6 +1752,15 @@
     }
 
     append(@"调度策略：%@", [BenchSystemMetrics schedulePolicyName:[self schedulePolicyFromSegment]]);
+    // 0 是「自动」而不是「指定 0 个线程」：配置层把 0 解释为让库按核心数取满，
+    // 所以这里单独判 0，避免日志写出「0（命令行指定）」这种自相矛盾的说法。
+    if (self.threadsOverride > 0) {
+        append(@"线程数：%ld（命令行指定）", (long)self.threadsOverride);
+    } else if (self.threadsOverride == 0) {
+        append(@"线程数：自动（按逻辑核数取满）");
+    } else {
+        append(@"线程数：自动（库默认）");
+    }
     append(@"开始批量测试：%lu 个码流", (unsigned long)self.batchTotal);
 
     __weak typeof(self) weakSelf = self;

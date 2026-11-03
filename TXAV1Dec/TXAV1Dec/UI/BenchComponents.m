@@ -746,3 +746,455 @@ static const CGFloat kRowHeight = 40.0;
 }
 
 @end
+
+#pragma mark - BenchMultiSelectItem
+
+@implementation BenchMultiSelectItem
+
++ (instancetype)itemWithTitle:(NSString *)title detail:(NSString *)detail {
+    BenchMultiSelectItem *item = [[BenchMultiSelectItem alloc] init];
+    item.title = title;
+    item.detail = detail;
+    item.selected = NO;
+    item.enabled = YES;
+    return item;
+}
+
+@end
+
+#pragma mark - BenchMultiSelectRow
+
+/**
+ * 浮层里的一行。
+ *
+ * 用 UIControl 而不是「视图 + 手势」：UIControl 自带高亮态与点击消抖，
+ * 手指按下时立刻给出底色反馈。面板不再自动开合后，用户唯一的即时反馈
+ * 就是这一行的视觉变化，所以按下态必须做。
+ */
+@interface BenchMultiSelectRow : UIControl
+
+@property (nonatomic, strong) UILabel *checkLabel;
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UILabel *detailLabel;
+
+- (void)configureWithItem:(BenchMultiSelectItem *)item;
+
+@end
+
+@implementation BenchMultiSelectRow {
+    /// 方形勾选框的底框，选中时填色
+    UIView *_box;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+
+    // 用「方形底框 + 对勾」而不是单个字符：
+    // 字符勾选在未选中时位置上什么都没有，用户看不出这里可以勾，
+    // 也难以判断当前到底选中了几项。空方框把「可勾选」这件事显式画出来。
+    _box = [[UIView alloc] init];
+    _box.translatesAutoresizingMaskIntoConstraints = NO;
+    _box.layer.cornerRadius = 5;
+    _box.layer.borderWidth = 1.5;
+    _box.userInteractionEnabled = NO;
+    [_box.widthAnchor constraintEqualToConstant:22].active = YES;
+    [_box.heightAnchor constraintEqualToConstant:22].active = YES;
+
+    _checkLabel = [[UILabel alloc] init];
+    _checkLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
+    _checkLabel.textAlignment = NSTextAlignmentCenter;
+    _checkLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [_box addSubview:_checkLabel];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [_checkLabel.centerXAnchor constraintEqualToAnchor:_box.centerXAnchor],
+        [_checkLabel.centerYAnchor constraintEqualToAnchor:_box.centerYAnchor],
+    ]];
+
+    _titleLabel = [[UILabel alloc] init];
+    _titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightRegular];
+    _titleLabel.textColor = [BenchTheme primaryText];
+    _titleLabel.numberOfLines = 1;
+    _titleLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    // 名称吃掉剩余宽度，把时间戳推到右边；时间戳不参与拉伸
+    [_titleLabel setContentHuggingPriority:UILayoutPriorityDefaultLow - 1
+                                   forAxis:UILayoutConstraintAxisHorizontal];
+    [_titleLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultLow
+                                                 forAxis:UILayoutConstraintAxisHorizontal];
+
+    _detailLabel = [[UILabel alloc] init];
+    _detailLabel.font = [BenchTheme captionFont];
+    _detailLabel.textColor = [BenchTheme secondaryText];
+    _detailLabel.numberOfLines = 1;
+    _detailLabel.textAlignment = NSTextAlignmentRight;
+    [_detailLabel setContentHuggingPriority:UILayoutPriorityRequired
+                                    forAxis:UILayoutConstraintAxisHorizontal];
+    // 优先级高于名称（DefaultLow）所以正常情况不会被压扁，
+    // 但不设成 required：不可用版本的错误文本可能很长，
+    // 必争会导致与名称之间的约束冲突，界面上表现为布局告警与错位。
+    [_detailLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultHigh + 1
+                                                  forAxis:UILayoutConstraintAxisHorizontal];
+
+    // 名称与时间戳同一行：两行文字会把每行行高翻倍，选项一多就得滚动；
+    // 时间戳是次要信息，放右端同一水平线上既能读到，又只占一份行高。
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[_box, _titleLabel, _detailLabel]];
+    row.axis = UILayoutConstraintAxisHorizontal;
+    row.alignment = UIStackViewAlignmentCenter;
+    row.spacing = 12;
+    [row setCustomSpacing:8 afterView:_titleLabel];
+    // 内部不接手势，点击统一交给外层 UIControl
+    row.userInteractionEnabled = NO;
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    [self addSubview:row];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [row.topAnchor constraintEqualToAnchor:self.topAnchor constant:6],
+        [row.bottomAnchor constraintEqualToAnchor:self.bottomAnchor constant:-6],
+        [row.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:14],
+        [row.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-14],
+    ]];
+
+    return self;
+}
+
+- (void)configureWithItem:(BenchMultiSelectItem *)item {
+    // 选中：主色填充 + 白勾；未选中：只留描边空框。
+    // 两种状态的填充差异足够大，扫一眼就能数出选中了几项。
+    UIColor *accent = [BenchTheme accent];
+    _box.backgroundColor = item.selected ? accent : [UIColor clearColor];
+    _box.layer.borderColor = (item.selected ? accent : [BenchTheme secondaryText]).CGColor;
+
+    self.checkLabel.text = item.selected ? @"✓" : @"";
+    self.checkLabel.textColor = [UIColor whiteColor];
+    self.titleLabel.text = item.title;
+    self.titleLabel.textColor = item.selected ? accent : [BenchTheme primaryText];
+    self.detailLabel.text = item.detail;
+    self.detailLabel.hidden = (item.detail.length == 0);
+
+    // 不可用项压暗但仍留在列表里、也仍可点击：
+    // 静默隐藏会让人以为构建漏了某个版本，实际是那个库有问题；
+    // 若同时禁掉点击，用户点了没反应也说不清原因，所以让调用方
+    // 收到回调后弹一条明确的失败说明。
+    self.alpha = item.enabled ? 1.0 : 0.45;
+}
+
+- (void)setHighlighted:(BOOL)highlighted {
+    [super setHighlighted:highlighted];
+    self.backgroundColor = highlighted
+        ? [[BenchTheme accent] colorWithAlphaComponent:0.08]
+        : [UIColor clearColor];
+}
+
+@end
+
+#pragma mark - BenchMultiSelectPanel
+
+@interface BenchMultiSelectPanel ()
+
+@property (nonatomic, strong) UIView *container;
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UILabel *messageLabel;
+@property (nonatomic, strong) UIScrollView *scrollView;
+@property (nonatomic, strong) UIStackView *rowsStack;
+@property (nonatomic, strong) NSArray<BenchMultiSelectItem *> *items;
+@property (nonatomic, strong) UIButton *extraActionButton;
+@property (nonatomic, copy) void (^extraActionHandler)(void);
+
+@end
+
+@implementation BenchMultiSelectPanel
+
++ (instancetype)presentInView:(UIView *)hostView
+                        title:(NSString *)title
+                      message:(NSString *)message
+                        items:(NSArray<BenchMultiSelectItem *> *)items {
+    if (!hostView) return nil;
+
+    BenchMultiSelectPanel *panel = [[BenchMultiSelectPanel alloc] initWithFrame:hostView.bounds];
+    panel.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    panel.titleLabel.text = title;
+    panel.messageLabel.text = message;
+    panel.messageLabel.hidden = (message.length == 0);
+
+    [hostView addSubview:panel];
+    [panel reloadWithItems:items];
+    [panel animateIn];
+
+    return panel;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+
+    // 遮罩用 UIControl 承担「点空白关闭」，而不是加手势：
+    // 手势会同时命中容器内部的行，导致点选项时面板被一起关掉。
+    UIControl *dimView = [[UIControl alloc] initWithFrame:self.bounds];
+    dimView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    dimView.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.35];
+    [dimView addTarget:self action:@selector(dismiss) forControlEvents:UIControlEventTouchUpInside];
+    [self addSubview:dimView];
+
+    _container = [[UIView alloc] init];
+    _container.translatesAutoresizingMaskIntoConstraints = NO;
+    [BenchTheme applyCardStyleToView:_container];
+    _container.backgroundColor = [BenchTheme cardBackground];
+    [self addSubview:_container];
+
+    _titleLabel = [[UILabel alloc] init];
+    _titleLabel.font = [BenchTheme sectionFont];
+    _titleLabel.textColor = [BenchTheme primaryText];
+    _titleLabel.textAlignment = NSTextAlignmentCenter;
+
+    _messageLabel = [[UILabel alloc] init];
+    _messageLabel.font = [BenchTheme captionFont];
+    _messageLabel.textColor = [BenchTheme secondaryText];
+    _messageLabel.textAlignment = NSTextAlignmentCenter;
+    _messageLabel.numberOfLines = 0;
+
+    _rowsStack = [[UIStackView alloc] init];
+    _rowsStack.axis = UILayoutConstraintAxisVertical;
+    _rowsStack.spacing = 0;
+    _rowsStack.translatesAutoresizingMaskIntoConstraints = NO;
+
+    _scrollView = [[UIScrollView alloc] init];
+    _scrollView.translatesAutoresizingMaskIntoConstraints = NO;
+    _scrollView.alwaysBounceVertical = NO;
+    [_scrollView addSubview:_rowsStack];
+
+    // 「全选」放进面板内部：面板不自动关闭，用户可以边看列表边决定
+    // 全选还是只挑几个，这个操作天然属于面板。
+    UIButton *selectAllButton = [BenchSecondaryButton compactButtonWithTitle:@"全选"];
+    [selectAllButton addTarget:self
+                        action:@selector(handleSelectAll)
+              forControlEvents:UIControlEventTouchUpInside];
+    [selectAllButton setContentHuggingPriority:UILayoutPriorityRequired
+                                       forAxis:UILayoutConstraintAxisHorizontal];
+
+    // 快捷动作默认隐藏，由 setExtraActionTitle:handler: 按需显示
+    _extraActionButton = [BenchSecondaryButton compactButtonWithTitle:@""];
+    _extraActionButton.hidden = YES;
+    [_extraActionButton addTarget:self
+                           action:@selector(handleExtraAction)
+                 forControlEvents:UIControlEventTouchUpInside];
+    [_extraActionButton setContentHuggingPriority:UILayoutPriorityRequired
+                                          forAxis:UILayoutConstraintAxisHorizontal];
+
+    UIButton *doneButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIButtonConfiguration *doneConfig = [UIButtonConfiguration filledButtonConfiguration];
+    doneConfig.title = @"完成";
+    doneConfig.baseBackgroundColor = [BenchTheme accent];
+    doneConfig.baseForegroundColor = [UIColor whiteColor];
+    doneConfig.cornerStyle = UIButtonConfigurationCornerStyleMedium;
+    doneConfig.contentInsets = NSDirectionalEdgeInsetsMake(6, 16, 6, 16);
+    doneButton.configuration = doneConfig;
+    [doneButton addTarget:self action:@selector(dismiss) forControlEvents:UIControlEventTouchUpInside];
+    [doneButton setContentHuggingPriority:UILayoutPriorityRequired
+                                  forAxis:UILayoutConstraintAxisHorizontal];
+
+    // 左侧放全选与快捷动作，中间弹性占位，右侧「完成」。
+    // 弹性占位让「完成」始终贴在右下角，即使快捷动作不显示也不会跑位。
+    UIView *footerSpacer = [[UIView alloc] init];
+    [footerSpacer setContentHuggingPriority:UILayoutPriorityDefaultLow - 1
+                                    forAxis:UILayoutConstraintAxisHorizontal];
+
+    UIStackView *footer = [[UIStackView alloc] initWithArrangedSubviews:@[
+        selectAllButton, _extraActionButton, footerSpacer, doneButton
+    ]];
+    footer.axis = UILayoutConstraintAxisHorizontal;
+    footer.alignment = UIStackViewAlignmentCenter;
+    footer.spacing = 10;
+
+    UIStackView *root = [[UIStackView alloc] initWithArrangedSubviews:@[
+        _titleLabel, _messageLabel, _scrollView, footer
+    ]];
+    root.axis = UILayoutConstraintAxisVertical;
+    root.spacing = 12;
+    root.alignment = UIStackViewAlignmentFill;
+    root.translatesAutoresizingMaskIntoConstraints = NO;
+    [_container addSubview:root];
+
+    const CGFloat pad = 16;
+
+    NSLayoutConstraint *centerY =
+        [_container.centerYAnchor constraintEqualToAnchor:self.centerYAnchor];
+    centerY.priority = UILayoutPriorityDefaultHigh;
+
+    [NSLayoutConstraint activateConstraints:@[
+        [root.topAnchor constraintEqualToAnchor:_container.topAnchor constant:pad],
+        [root.leadingAnchor constraintEqualToAnchor:_container.leadingAnchor constant:pad],
+        [root.trailingAnchor constraintEqualToAnchor:_container.trailingAnchor constant:-pad],
+        [root.bottomAnchor constraintEqualToAnchor:_container.bottomAnchor constant:-pad],
+
+        [_rowsStack.topAnchor constraintEqualToAnchor:_scrollView.contentLayoutGuide.topAnchor],
+        [_rowsStack.leadingAnchor constraintEqualToAnchor:_scrollView.contentLayoutGuide.leadingAnchor],
+        [_rowsStack.trailingAnchor constraintEqualToAnchor:_scrollView.contentLayoutGuide.trailingAnchor],
+        [_rowsStack.bottomAnchor constraintEqualToAnchor:_scrollView.contentLayoutGuide.bottomAnchor],
+        [_rowsStack.widthAnchor constraintEqualToAnchor:_scrollView.frameLayoutGuide.widthAnchor],
+
+        [_container.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
+        // 用「不小于顶部安全距离」配合居中，而不是硬居中：
+        // 内容少时垂直居中好看；内容多时贴住安全区边缘，
+        // 不会被推到状态栏底下把标题压住（截图里标题被盖就是这个原因）。
+        // 居中设为 high 而非 required：内容真的超高时让它让步，
+        // 由上下安全区约束决定位置，不会报约束冲突。
+        centerY,
+        [_container.topAnchor constraintGreaterThanOrEqualToAnchor:self.safeAreaLayoutGuide.topAnchor
+                                                          constant:12],
+        [_container.bottomAnchor constraintLessThanOrEqualToAnchor:self.safeAreaLayoutGuide.bottomAnchor
+                                                          constant:-12],
+        [_container.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.leadingAnchor constant:16],
+        [_container.trailingAnchor constraintLessThanOrEqualToAnchor:self.trailingAnchor constant:-16],
+        [_container.widthAnchor constraintLessThanOrEqualToConstant:380],
+    ]];
+
+    // 宽度按「贴边减 32」自适应，再用 380 上限压住：
+    // 手机上贴合屏幕，iPad 上不至于拉成一条细长条。
+    NSLayoutConstraint *preferredWidth = [_container.widthAnchor constraintEqualToAnchor:self.widthAnchor
+                                                                             constant:-32];
+    preferredWidth.priority = UILayoutPriorityDefaultHigh;
+    preferredWidth.active = YES;
+
+    // 高度策略：贴合内容 + 上限封顶 + 最小高度兜底。
+    //
+    // 关键点是把「让面板撑满屏幕」那条约束删掉。之前有一条低优先级的
+    // 「container 高度 == 屏幕高度 - 120」，本意是给高度一个确定值以避开
+    // 布局告警，结果是内容只有两三行时面板仍被撑到接近全屏；容器一高，
+    // 根 stack 就要填满容器，唯一能伸展的滚动视图被拉长，滚动视图又与
+    // 行容器等高，多出来的高度只能分摊给各行，于是行被拉到相隔几百点。
+    //
+    // 现在：滚动视图高度优先贴合内容（700），这样内容少时面板紧凑；
+    // 内容多时由容器上限（required）打破这条约束，剩余空间自然落到
+    // 滚动视图上并进入滚动。再给滚动视图一个最小高度，避免极端情况下
+    // 被标题和按钮挤成 0。
+    NSLayoutConstraint *contentHeight =
+        [_scrollView.heightAnchor constraintEqualToAnchor:_rowsStack.heightAnchor];
+    contentHeight.priority = UILayoutPriorityDefaultHigh - 50;
+    contentHeight.active = YES;
+
+    [_scrollView.heightAnchor constraintGreaterThanOrEqualToConstant:120].active = YES;
+
+    NSLayoutConstraint *maxHeight =
+        [_container.heightAnchor constraintLessThanOrEqualToAnchor:self.heightAnchor
+                                                          constant:-120];
+    maxHeight.priority = UILayoutPriorityRequired;
+    maxHeight.active = YES;
+
+    return self;
+}
+
+- (void)reloadWithItems:(NSArray<BenchMultiSelectItem *> *)items {
+    self.items = items;
+
+    // 项数不变时（切换选中态是最常见的情况）只重新配置现有行，不重建视图：
+    // 重建会丢高亮态、打断滚动惯性，还会让 iOS 重新做一轮布局，
+    // 在常开面板里表现为每点一次就轻微抖一下。
+    NSArray<UIView *> *existing = self.rowsStack.arrangedSubviews;
+    if (items.count > 0 && existing.count == items.count) {
+        BOOL allRows = YES;
+        for (UIView *view in existing) {
+            if (![view isKindOfClass:[BenchMultiSelectRow class]]) {
+                allRows = NO;
+                break;
+            }
+        }
+        if (allRows) {
+            for (NSInteger i = 0; i < (NSInteger)items.count; i++) {
+                [(BenchMultiSelectRow *)existing[i] configureWithItem:items[i]];
+            }
+            return;
+        }
+    }
+
+    NSMutableArray<UIView *> *newRows = [NSMutableArray array];
+
+    if (items.count == 0) {
+        UILabel *empty = [[UILabel alloc] init];
+        empty.text = @"没有可选项";
+        empty.font = [BenchTheme bodyFont];
+        empty.textColor = [BenchTheme secondaryText];
+        empty.textAlignment = NSTextAlignmentCenter;
+        [empty.heightAnchor constraintEqualToConstant:80].active = YES;
+        [newRows addObject:empty];
+    } else {
+        for (NSInteger i = 0; i < (NSInteger)items.count; i++) {
+            BenchMultiSelectItem *item = items[i];
+            BenchMultiSelectRow *row = [[BenchMultiSelectRow alloc] initWithFrame:CGRectZero];
+            [row configureWithItem:item];
+            // tag 存下标，回调只需要回传位置，面板不关心业务对象是什么
+            row.tag = i;
+            [row addTarget:self
+                    action:@selector(handleRowTap:)
+          forControlEvents:UIControlEventTouchUpInside];
+            [newRows addObject:row];
+        }
+    }
+
+    // 先插入新行再移除旧行：反过来的话会瞬间出现「零高度 → 恢复高度」跳变
+    for (UIView *row in newRows) {
+        [self.rowsStack addArrangedSubview:row];
+    }
+    for (UIView *row in existing) {
+        [self.rowsStack removeArrangedSubview:row];
+        [row removeFromSuperview];
+    }
+}
+
+- (void)handleRowTap:(BenchMultiSelectRow *)row {
+    // 只上报点击，既不改本地选中态也不关闭面板。
+    // 选中态的唯一真值在调用方（selectedStreams / selectedDecoders）：
+    // 面板若自己先改一遍，调用方 reload 时会出现两份状态互相覆盖。
+    // 不可用项也照常上报，由调用方决定是提示还是忽略——
+    // 面板不知道业务语义，替调用方过滤会让"点了没反应"无从解释。
+    const NSInteger index = row.tag;
+    if (index < 0 || index >= (NSInteger)self.items.count) return;
+
+    // 回调会让调用方 reload 列表，也就是把这行本身从层级里摘掉。
+    // 不在 touchesEnded 的派发栈内做这件事，推迟到下一次 runloop，
+    // 事件派发完成后再重建，避免在行的手势处理过程中释放视图。
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        if (self.onToggleItem) self.onToggleItem(index);
+    });
+}
+
+- (void)handleSelectAll {
+    if (self.onSelectAll) self.onSelectAll();
+}
+
+- (void)setExtraActionTitle:(NSString *)title handler:(void (^)(void))handler {
+    self.extraActionHandler = handler;
+    self.extraActionButton.hidden = (title.length == 0 || handler == nil);
+    if (title.length == 0) return;
+
+    UIButtonConfiguration *config = self.extraActionButton.configuration;
+    config.title = title;
+    self.extraActionButton.configuration = config;
+}
+
+- (void)handleExtraAction {
+    if (self.extraActionHandler) self.extraActionHandler();
+}
+
+- (void)animateIn {
+    self.alpha = 0;
+    self.container.transform = CGAffineTransformMakeScale(0.96, 0.96);
+    [UIView animateWithDuration:0.18 animations:^{
+        self.alpha = 1;
+        self.container.transform = CGAffineTransformIdentity;
+    }];
+}
+
+- (void)dismiss {
+    if (self.onDismiss) self.onDismiss();
+    [UIView animateWithDuration:0.15 animations:^{
+        self.alpha = 0;
+    } completion:^(BOOL finished) {
+        [self removeFromSuperview];
+    }];
+}
+
+@end

@@ -176,6 +176,78 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
+#pragma mark - 多选浮层
+
+/**
+ * 多选浮层里的一行。
+ *
+ * 只承载数据，选中状态由调用方维护：码流与解码器的「真值」分别在
+ * selectedStreams / selectedDecoders 里，浮层只负责渲染。这样浮层关掉、
+ * 重开、或界面重建都不会让选中态与业务数据脱钩。
+ */
+@interface BenchMultiSelectItem : NSObject
+
+@property (nonatomic, copy) NSString *title;
+/** 右侧补充信息，例如文件大小、构建时间、不可用原因 */
+@property (nonatomic, copy, nullable) NSString *detail;
+@property (nonatomic, assign) BOOL selected;
+/** 不可用项仍然列出并说明原因，但不可点选 */
+@property (nonatomic, assign) BOOL enabled;
+
++ (instancetype)itemWithTitle:(NSString *)title detail:(nullable NSString *)detail;
+
+@end
+
+/**
+ * 不会自动收起的多选浮层。
+ *
+ * 为什么不用 UIAlertController：action sheet 的语义是「选一项即完成」，
+ * 任何一次点击都会关闭面板，且没有获得点击事件的回调。早期为了支持连续
+ * 多选，只能在每次选中后立刻重新弹一个，视觉上是面板反复收回又弹出，
+ * 用户会误以为面板被关掉了。
+ *
+ * 这里改用自建浮层，交互约定为：
+ * - 点任意一行：在该行原地切换选中/取消，面板保持打开；
+ * - 再点一次同一行：取消选中（复选语义，不是单选）；
+ * - 点面板外的空白区域：关闭；
+ * - 点「完成」：关闭。
+ */
+@interface BenchMultiSelectPanel : UIView
+
+/** 点击某一行的回调，index 对应传入 items 的下标 */
+@property (nonatomic, copy, nullable) void (^onToggleItem)(NSInteger index);
+@property (nonatomic, copy, nullable) void (^onSelectAll)(void);
+@property (nonatomic, copy, nullable) void (^onDismiss)(void);
+
+/**
+ * 可选的第三个快捷动作，例如解码器面板的「仅选最新版本」。
+ *
+ * 用独立入口而不是往 items 里塞一行「动作行」：动作与选项混在同一个列表里，
+ * 勾选符号会和动作文字并排出现，用户很难分辨哪些行是可勾选的项。
+ * 传 nil 时该按钮不显示。
+ */
+- (void)setExtraActionTitle:(nullable NSString *)title handler:(nullable void (^)(void))handler;
+
+/**
+ * 在 hostView（通常是窗口或控制器根视图）上弹出浮层。
+ *
+ * 用 addSubview 而不是 presentViewController：浮层只是配置面板，
+ * 不是独立页面，关闭时也不需要处理转场，铺在窗口上最直接，
+ * 也不影响控制器自身的 presentedViewController 状态。
+ */
++ (nullable instancetype)presentInView:(UIView *)hostView
+                                 title:(NSString *)title
+                               message:(nullable NSString *)message
+                                 items:(NSArray<BenchMultiSelectItem *> *)items;
+
+/** 用新的数据重建列表，选中态变化后调用即可，不影响面板的开合状态 */
+- (void)reloadWithItems:(NSArray<BenchMultiSelectItem *> *)items;
+
+/** 关闭并移除自身 */
+- (void)dismiss;
+
+@end
+
 #pragma mark - 次要按钮
 
 /** 描边样式的次要按钮，用于「复制报告」这类非主操作 */

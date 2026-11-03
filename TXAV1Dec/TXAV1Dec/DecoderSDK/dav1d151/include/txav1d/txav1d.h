@@ -23,6 +23,15 @@
 #ifndef TXAV1D_SHIM_DAV1D_TXAV1D_H
 #define TXAV1D_SHIM_DAV1D_TXAV1D_H
 
+/**
+ * 标识当前编的是 dav1d 兼容层，而不是真正的 txav1d。
+ *
+ * 共用源码里有些适配只对 txav1d 成立（例如写 reserved[0] 突破 2 线程上限），
+ * 在 dav1d 上写了没有意义甚至语义不同。头文件守护宏名太长且属于实现细节，
+ * 这里给一个专门的宏，让判断点读起来就知道在区分什么。
+ */
+#define TXAV1D_SHIM_DAV1D 1
+
 #include <string.h>
 
 #include "dav1d/dav1d.h"

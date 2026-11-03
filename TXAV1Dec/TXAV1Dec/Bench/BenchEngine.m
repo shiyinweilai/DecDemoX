@@ -320,7 +320,8 @@ NSString *BenchDecoderVersionDescription(void) {
                                        timeStyle:NSDateFormatterMediumStyle]];
 
     if (sample) {
-        [text appendFormat:@"码流      : %@\n", config.streamName ?: sample.resolutionDescription];
+        // 报告不写码流文件名：测试条件已对齐，码流是作者自己知道的常量，
+        // 写进来只占行数。分辨率、源帧率、总帧数才是解释指标的必需信息。
         [text appendFormat:@"分辨率    : %@\n", sample.resolutionDescription];
         [text appendFormat:@"源帧率    : %.3f fps\n", sample.sourceFPS];
         [text appendFormat:@"码流总帧  : %lu\n", (unsigned long)sample.totalFrames];

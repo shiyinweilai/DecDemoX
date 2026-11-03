@@ -25,6 +25,10 @@
 #include <time.h>
 #ifdef __APPLE__
 #include <mach/mach_time.h>
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#else
+#include <unistd.h>
 #endif
 
 #include "txav1d/txav1d.h"
@@ -53,6 +57,27 @@ static uint64_t bench_now_nanos(void) {
 
 static double nanos_to_ms(const uint64_t nanos) {
     return (double)nanos / 1000000.0;
+}
+
+/**
+ * 本机逻辑核数。与两个解码库内部 num_logical_processors() 在 Apple 平台
+ * 的实现保持同一口径（hw.logicalcpu），保证「自动」档两边拿到相同的数。
+ * 取不到时返回 0，由调用方退化为单线程。
+ */
+static int bench_logical_cpu_count(void) {
+#if defined(__APPLE__)
+    int count = 0;
+    size_t len = sizeof(count);
+    if (sysctlbyname("hw.logicalcpu", &count, &len, NULL, 0) == 0) {
+        return count;
+    }
+    return 0;
+#elif defined(_SC_NPROCESSORS_ONLN)
+    const long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return n > 0 ? (int)n : 0;
+#else
+    return 0;
+#endif
 }
 
 static void set_error(Txav1dBenchResult *const r, const char *const msg) {
@@ -126,7 +151,43 @@ int txav1d_bench(const Txav1dBenchConfig *const cfg,
     Txav1dSettings settings;
     txav1d_default_settings(&settings);
     settings.strict_std_compliance = 1;
+#ifndef TXAV1D_SHIM_DAV1D
+    // 「自动」必须显式填满核数，不能只靠库默认值：
+    // txav1d_default_settings 里 s->n_threads = 1，而 dav1d 是 0（按逻辑核自动取满）。
+    // 两边都留 0 让库自己决定时，同一个「自动」档在 txav1d 上实际是纯单线程，
+    // 会得出「txav1d 比 dav1d 慢 2.4 倍」这种线程数不对齐的结论。
+    // 这里统一在自动档按本机逻辑核数填写，并同样走 reserved[0] 绕过 2 线程上限。
+    if (cfg->threads > 0) {
+        settings.n_threads = cfg->threads;
+        // txav1d 的 get_num_threads() 对 n_threads 设了硬上限：
+        //     threads = imin(s->n_threads, max_threads_used /* = 2 */)
+        // 所以只写 n_threads 时，超过 2 的线程数会被静默截掉，
+        // 命令行调 8 实际仍只跑 2 个 tile 线程，从数据上几乎看不出来。
+        // 同一函数里另有一条私有通道：
+        //     if (s->reserved[0]) threads = s->reserved[0];
+        // 它的判断在上限之前，能绕过上面的截断。官方 CLI 的 --threads
+        // 正是写这个字段（见 txav1d_cli_parse.c 的 ARG_THREADS 分支），
+        // 所以这就是官方指定的线程数入口，不是私搭的旁路。
+        //
+        // 两处都写：n_threads 保持对外语义正确（get_frame_delay 等接口读它），
+        // reserved[0] 负责真正突破限制。reserved[0] 是 uint8_t，
+        // 超过 255 会被截断，先夹紧再写。
+        settings.reserved[0] = (uint8_t)(cfg->threads > 255 ? 255 : cfg->threads);
+    } else {
+        // 自动档：取逻辑核数上限，与 dav1d 的 n_threads=0 语义对齐。
+        // 这里不调用 txav1d_num_logical_processors()：它在静态库里存在，
+        // 但两个版本的头文件都没声明，属于内部符号。用它会让 dylib 依赖
+        // 一个非公开 API，换库版本时可能直接链接失败。库内部在 Apple 平台
+        // 读的也是 hw.logicalcpu，这里用同一个系统调用，口径一致。
+        int autoThreads = bench_logical_cpu_count();
+        if (autoThreads < 1) autoThreads = 1;
+        if (autoThreads > 255) autoThreads = 255;
+        settings.n_threads = autoThreads;
+        settings.reserved[0] = (uint8_t)autoThreads;
+    }
+#else
     if (cfg->threads > 0) settings.n_threads = cfg->threads;
+#endif
     if (cfg->frame_delay > 0) settings.max_frame_delay = cfg->frame_delay;
     if (cfg->apply_grain >= 0) settings.apply_grain = cfg->apply_grain;
     if (cfg->wpp >= 0) settings.use_wpp = cfg->wpp;
