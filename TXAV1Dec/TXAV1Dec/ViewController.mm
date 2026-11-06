@@ -2072,6 +2072,36 @@ static id BenchJSONString(NSString *value) {
     append(@"可用解码器 %lu 个，已选 %lu 个",
            (unsigned long)self.decoders.count, (unsigned long)self.selectedDecoders.count);
 
+    // --stream <名字>：自动化指定要测的序列（按文件名或显示名匹配，逗号分隔可多选）。
+    // 未指定时保持默认（选中第一个），不影响正常启动的界面交互。
+    NSUInteger streamIndex = [[NSProcessInfo processInfo].arguments indexOfObject:@"--stream"];
+    NSArray<NSString *> *cliArgs = [NSProcessInfo processInfo].arguments;
+    if (streamIndex != NSNotFound && streamIndex + 1 < cliArgs.count) {
+        NSArray<NSString *> *wanted = [cliArgs[streamIndex + 1] componentsSeparatedByString:@","];
+        NSMutableArray<BenchStream *> *picked = [NSMutableArray array];
+        for (NSString *w in wanted) {
+            NSString *key = [w stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+            if (key.length == 0) continue;
+            for (BenchStream *stream in self.streams) {
+                if ([stream.name isEqualToString:key] ||
+                    [stream.path.lastPathComponent isEqualToString:key] ||
+                    [stream.name.stringByDeletingPathExtension isEqualToString:key]) {
+                    if (![picked containsObject:stream]) [picked addObject:stream];
+                    break;
+                }
+            }
+        }
+        if (picked.count > 0) {
+            self.selectedStreams = picked;
+            [self refreshStreamPickerDisplay];
+            append(@"已按 --stream 选中 %lu 个码流：%@",
+                   (unsigned long)picked.count,
+                   [[picked valueForKey:@"name"] componentsJoinedByString:@", "]);
+        } else {
+            append(@"警告：--stream %@ 没匹配到任何码流，沿用默认选择", cliArgs[streamIndex + 1]);
+        }
+    }
+
     // 自测默认全选，才能覆盖多码流批量与对比表路径
     if ([[NSProcessInfo processInfo].arguments containsObject:@"--all-streams"]) {
         self.selectedStreams = [self.streams mutableCopy];
