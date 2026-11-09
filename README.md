@@ -29,13 +29,11 @@ DecDemoX/
         ├── DecoderSDK/                # 解码器版本快照，按目录名分版本
         │   ├── Version.xcconfig       # 头文件路径派生（不再选择版本）
         │   ├── build_decoder_dylibs.sh # 构建期把每个版本编成独立动态库
-        │   ├── txav1d142/
+        │   ├── txav1d_c01c1623/       # txav1d 自研版，目录名取 commit 前 8 位
         │   │   ├── include/           # 公共头文件（txav1d.h / picture.h / vcs_version.h 等）
-        │   │   └── lib/libtxav1d.a    # 该版本的静态库（arm64, iphoneos）
-        │   ├── txav1d143/
-        │   │   ├── include/
-        │   │   └── lib/libtxav1d.a
-        │   └── dav1d151/              # 上游 dav1d，与 txav1d 不是同一套 API
+        │   │   ├── lib/libtxav1d.a    # 该版本的静态库（arm64, iphoneos）
+        │   │   └── SOURCE.txt         # 记录来源 commit，便于回溯
+        │   └── dav1d155/              # 上游 dav1d，与 txav1d 不是同一套 API
         │       ├── include/dav1d/     # 上游公共头
         │       ├── include/txav1d/    # 兼容层：把 txav1d_* 映射到 dav1d_*
         │       ├── src/txav1d_shim.c  # 兼容层里需要真实包装的两个函数
@@ -187,23 +185,19 @@ xcodebuild -project TXAV1Dec.xcodeproj -scheme TXAV1Dec \
 
 界面上的「解码器版本（可多选）」与码流选择是同一套交互：点开弹出列表，勾选一个或多个版本。**版本列表直接来自 `DecoderSDK` 下的子目录名**，新增版本只需放一个目录并重新编译，界面自动多出一项，不需要改任何代码。
 
-目录名就是界面上显示的版本标识，目前有六项：
+目录名就是界面上显示的版本标识，目前有两项：
 
 ```
 TXAV1Dec/TXAV1Dec/DecoderSDK/
-├── txav1d142/{include, lib/libtxav1d.a}
-├── txav1d143/{include, lib/libtxav1d.a}
-├── txav1d154/{include, lib/libtxav1d.a}
-├── dav1d150/{include, src, lib/libdav1d.a}
-├── dav1d151/{include, src, lib/libdav1d.a}
-├── dav1d154/{include, src, lib/libdav1d.a}
+├── txav1d_c01c1623/{include, lib/libtxav1d.a, SOURCE.txt}
+├── dav1d155/{include, src, lib/libdav1d.a}
 ├── Version.xcconfig            # 头文件与路径派生
 └── build_decoder_dylibs.sh     # 构建期把每个版本编成独立动态库
 ```
 
-目录名不必是三点式版本号。构建脚本会从头文件的 `TXAV1D_VERSION` / `DAV1D_VERSION` 宏取出真实版本串，再与目录名里的数字做压缩比对：`dav1d154` ↔ `"1.5.4"`、`txav1d143` ↔ `"1.4.3"` 都算一致。这样换库漏改目录名时仍会中止构建，而不会安静地跑错版本。
+目录名不必是三点式版本号。构建脚本会从头文件的 `TXAV1D_VERSION` / `DAV1D_VERSION` 宏取出真实版本串，再与目录名里的数字做压缩比对：`dav1d155` ↔ `"1.5.5"`、`txav1d143` ↔ `"1.4.3"` 都算一致。这样换库漏改目录名时仍会中止构建，而不会安静地跑错版本。以 commit 命名的目录（如 `txav1d_c01c1623`）则跳过数字比对，因为 txav1d 的版本宏长期停在 1.4.3 不跟提交走，改用「静态库内嵌版本串与头文件声明是否一致」来拦真正的错配，目录对应的完整 commit 记在同目录的 `SOURCE.txt`。
 
-`txav1d154` 与 `dav1d154` 是同一份 1.5.4 代码的两种封装：前者保留 `txav1d_` 原生前缀（带 `use_wpp` 扩展，与 `txav1d142/143` 同源可比），后者是上游 `dav1d_` 前缀经兼容层映射，用于对齐官方版本表现。两者数值不可混为一谈。
+两个现存版本来自不同代码线，数值不可直接比较：`txav1d_c01c1623` 是 txav1d 自研分支（`master_speed` 的 `c01c1623`，版本宏 1.4.3，带 `use_wpp` 私有扩展），`dav1d155` 是上游 VideoLAN dav1d 的 1.5.5，经兼容层把 `dav1d_*` 映射到 `txav1d_*`。前者代表自研优化方向，后者是对齐官方基线的参照物。
 
 ### 解码器的惰性加载
 
@@ -220,12 +214,12 @@ TXAV1Dec/TXAV1Dec/DecoderSDK/
 
 ### 接入上游 dav1d
 
-`dav1d150` / `dav1d151` / `dav1d154` 分别是上游 VideoLAN dav1d 的 1.5.0、1.5.1、1.5.4，它与 txav1d 有两个实质差异：
+`dav1d155` 是上游 VideoLAN dav1d 的 1.5.5，它与 txav1d 有两个实质差异：
 
 - **API 前缀不同**：上游是 `dav1d_` / `Dav1d`，txav1d 是 `txav1d_` / `Txav1d`。
 - **`Dav1dSettings` 没有 `use_wpp`**：那是 txav1d 的私有扩展，上游没有对应开关。
 
-这三个版本的 `Dav1dSettings` 字段与顺序完全相同，`DAV1D_API_VERSION` 都是 7.0.0，公开头文件差异只在内联注释格式，因此共用同一套兼容层，只有版本号不同。
+上游 1.5.x 各版本的 `Dav1dSettings` 字段与顺序相同，`DAV1D_API_VERSION` 均为 7.0.0，公开头文件差异只在内联注释格式，因此共用同一套兼容层，只有版本号不同。将来再接入 1.5.x 的其它 tag 时，直接复用现有兼容层即可。
 
 工程没有为此复制一份 tools 源码，而是在 `<版本>/include/txav1d/` 下放了一层名字映射头：共用源码原样编译，`txav1d_open`、`Txav1dPicture` 等由宏解析到 `dav1d_*` / `Dav1d*`。真正需要包装的只有 `txav1d_default_settings` 与 `txav1d_open` 两个（因为设置结构体多了 `use_wpp`，必须逐字段搬运），实现放在 `<版本>/src/txav1d_shim.c`。
 
@@ -233,24 +227,27 @@ TXAV1Dec/TXAV1Dec/DecoderSDK/
 
 ### 自己接入一个新版本
 
-新增 txav1d 版本不需要改任何代码，只有文件搬运和一次编译。以 `txav1d154` 为例：
+新增 txav1d 版本不需要改任何代码，只有文件搬运和一次编译。以 `txav1d_c01c1623` 为例：
 
 ```
 # 1. 建目录并放入产物（目录名决定界面上的版本标识）
 cd TXAV1Dec/TXAV1Dec/DecoderSDK
-mkdir -p txav1dNNN/lib txav1dNNN/include
-cp <产物>/lib/libtxav1d.a            txav1dNNN/lib/
-cp -R <产物>/include/*               txav1dNNN/include/
+mkdir -p txav1dNNNNNNNN/lib txav1dNNNNNNNN/include
+cp <产物>/lib/libtxav1d.a            txav1dNNNNNNNN/lib/
+cp -R <产物>/include/*               txav1dNNNNNNNN/include/
 
 # 2. 补上 common/ 头（共用 bench 源码依赖它，产物包通常不带）
-cp <源码>/include/common/{attributes,intops}.h  txav1dNNN/include/common/
+cp <源码>/include/common/{attributes,intops}.h  txav1dNNNNNNNN/include/common/
 
-# 3. 直接 Xcode 编译即可，构建脚本会自动发现并产出 libtxav1d_txav1dNNN.dylib
+# 3. 记录来源 commit（便于日后回溯是哪份代码）
+printf 'ref    %s\ncommit %s\n' <ref> <完整commit> > txav1dNNNNNNNN/SOURCE.txt
+
+# 4. 直接 Xcode 编译即可，构建脚本会自动发现并产出 libtxav1d_txav1dNNNNNNNN.dylib
 ```
 
 三个容易踩的点：
 
-- **目录名里的数字必须与库的版本串一致**。构建脚本会交叉校验目录名、`include/txav1d/vcs_version.h` 的宏、静态库里 `strings` 出来的版本串，三者对不上就中止构建。这是故意设计的：换库漏改目录名会造成「界面写 A、实际跑 B」，而这种错配从性能数据上完全看不出来。
+- **目录命名有两种模式，校验规则不同**。用三点式版本号命名（如 `txav1d143`）时，构建脚本会交叉校验目录名数字、`include/txav1d/vcs_version.h` 的宏、静态库里 `strings` 出来的版本串，三者对不上就中止构建。用 commit 前 8 位命名（如 `txav1d_c01c1623`）时跳过目录名比对，因为 txav1d 的版本宏长期停在 1.4.3 不跟提交走，此时靠「头文件声明与静态库内嵌串是否一致」来拦真正的错配。这是故意设计的：换库漏改目录名会造成「界面写 A、实际跑 B」，而这种错配从性能数据上完全看不出来。
 - **`common/` 不能忘**。它是 `DecoderTools` 共用源码的编译依赖，库的发布包里通常没有这一层，缺了会在编译 dylib 时报找不到 `common/attributes.h`。
 - **版本串可能和你想的不一样**。txav1d 的版本号写在 `CMakeLists.txt` 的 `TXAV1D_API_VERSION_*` 里，由 `python cmake_build.py -v X.Y.Z` 同步到各处；只更新 `src/` 而不升版本号，产物内嵌的仍是旧版本串。给库起目录名前先跑一次 `strings libtxav1d.a | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$'` 确认它自报的版本。
 
@@ -304,21 +301,21 @@ ninja -C <build>
 
 构建脚本会校验三处一致：目录名里的数字、`vcs_version.h` 的版本宏、静态库内嵌的版本串。任一处不符即中止构建。版本号同时存在于目录名和头文件两处，换库时漏改会造成「目录写 A、实际跑 B」的静默错配，而这种错配从数据上完全看不出来。
 
+唯一的例外是 commit 命名（`txav1d_` + 8 位十六进制）：这类目录跳过目录名比对，改由「头文件宏与静态库内嵌串一致」把关，并在 `SOURCE.txt` 里记下完整 commit。自研分支的版本宏不跟提交走，多个提交共用同一个版本串，所以只能用 commit 区分身份。
+
 若新版本来自与 txav1d API 不同的分支（如上游 dav1d），需要在该版本目录的 `include/txav1d/` 下放一层名字映射头，并把无法用宏表达的适配实现在 `src/` 里，脚本会自动把它一起编进 dylib。
 
 单个版本加载失败不会影响其他版本，界面会把它标为不可用并显示原因。
 
-### 实测结果（iPhone18,2 六核，200 帧 × 2 轮）
+### 实测结果（云真机 iPhone18,2 六核 2P+4E，test3 1920×1080，60 帧）
 
 两个版本在同一 App 内同时加载，各自报告正确版本号并独立解码：
 
-| 版本 | 码流 | fps | ms/f | CPU% | P95 ms | 净内存 |
-| --- | --- | --- | --- | --- | --- | --- |
-| txav1d143 | test3 | 363.54 | 2.751 | 16.73% | 16.74 | 30.9 MB |
-| txav1d143 | test3_copy | 352.06 | 2.840 | 16.69% | 16.97 | 30.2 MB |
-| txav1d142 | test3 | 345.81 | 2.892 | 16.52% | 17.71 | 30.6 MB |
-| txav1d142 | test3_copy | 342.42 | 2.920 | 16.73% | 17.88 | 30.1 MB |
+| 版本 | fps | ms/f | 帧率倍速 | CPU 整机占比 | 内存峰值 |
+| --- | --- | --- | --- | --- | --- |
+| dav1d155 | 941.53 | 1.0621 | 37.661x | 64.06% | 93 MB |
+| txav1d_c01c1623 | 1076.78 | 0.9287 | 43.071x | 81.84% | 101.44 MB |
 
-跨版本：txav1d143 相对 txav1d142 在 test3 上 +5.1% fps、在 test3_copy 上 +2.8% fps，CPU 基本持平。
+txav1d_c01c1623 相对 dav1d155 快约 14.4%，代价是多消耗约 17.8 个百分点的 CPU 整机占比、多占约 8.4 MB 内存。
 
-注意这个差值不宜直接当成版本改进量：txav1d143 总是先跑，设备温度与频率状态更有利。要排除顺序效应，可以把版本勾选顺序反过来再测一轮，或对同一版本重复多批观察轮间波动。之前单版本分别安装对比时两者几乎一致（差 0.12%），说明这 5% 主要来自同批内的执行顺序与热状态，而非库本身差异。
+这组数据的采集设备是 WeTest 云真机 `00008160-00127CD83C400036`（iPhone 18 Pro / iOS 27.0），属于同批内顺序执行，两版本之间仍存在先后带来的热状态差异。若要严格量化版本差异，应反序再跑一轮，或对同一版本重复多批观察轮间波动。

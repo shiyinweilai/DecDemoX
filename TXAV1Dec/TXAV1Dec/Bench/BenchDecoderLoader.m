@@ -73,11 +73,35 @@ typedef const char *(*VersionFn)(void);
     return [version stringByReplacingOccurrencesOfString:@"." withString:@""];
 }
 
+/// 目录名是否为 commit 命名（txav1d_4fe45527）。
+///
+/// 这类目录的身份是提交而不是版本号：txav1d 仓库的版本宏长期停在同一个数
+/// （相邻几个提交都是 1.4.3），拿库自报的版本串去和目录名比对永远不相等。
+/// 判断依据是「前缀 + 下划线 + 纯十六进制」，与构建脚本里的跳过规则一致。
++ (BOOL)isCommitNamedVersion:(NSString *)version {
+    NSRange sep = [version rangeOfString:@"_"];
+    if (sep.location == NSNotFound || sep.location + 1 >= version.length) return NO;
+    NSString *hex = [version substringFromIndex:sep.location + 1];
+    for (NSUInteger i = 0; i < hex.length; i++) {
+        const unichar c = [hex characterAtIndex:i];
+        const BOOL isHex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        if (!isHex) return NO;
+    }
+    return YES;
+}
+
 - (NSString *)displayName {
     // 目录名本身就是版本标识（txav1d142 / dav1d151），直接用它。
     // 早先这里拼成 "txav1d 1.4.3"，改成目录名之后会变成
     // "txav1d txav1d143" 这种重复，所以必须换掉前缀拼接。
     NSString *name = self.version;
+
+    // commit 命名的目录不再追加库自报版本：同一族相邻提交的版本宏通常相同，
+    // 三个目录都会写成「（库自报 1.4.3）」，既区分不了彼此又占满标题栏。
+    // 真正的来源信息在 DecoderSDK/<目录>/SOURCE.txt 里，界面只认目录名。
+    if ([BenchDecoder isCommitNamedVersion:name]) {
+        return name;
+    }
 
     // 库自报版本与目录名不一致时才追加提示。比较用压缩形式，
     // 因为目录名是 txav1d143、库自报是 1.4.3，写法不同但指向同一版本；
@@ -226,12 +250,25 @@ typedef const char *(*VersionFn)(void);
 
 /// 按版本从新到旧比较。
 ///
-/// 目录名有两种风格：旧的三点式（1.4.3）和新命名的压缩式（txav1d143、
-/// dav1d151）。原来按 "." 切分再比数字，遇到 txav1d143 这种没有点号的
-/// 名字会全部落到同一段，排序退化成不稳定、结果不可预期。
-/// 这里改为：先按名字里的数字序列比较（把 txav1d143 抽出 143），
-/// 数字相同再按字面比较，保证排序稳定。
+/// 目录名有三种风格：旧的三点式（1.4.3）、压缩式（txav1d143、dav1d151），
+/// 以及 commit 命名（txav1d_4fe45527）。第一种情况原实现按 "." 切分再比
+/// 数字，遇到没有点号的名字会全部落到同一段，排序退化成不稳定；第三种更糟：
+/// digitsOf 会把 "txav1d_" 里的 1 也抽出来，得到 1755073 这种既不是版本
+/// 也无法相互比较的数值，和 dav1d151 放一起排出来的顺序纯属偶然。
+///
+/// 现在的规则：commit 命名的目录整体排在版本号目录之前（它们是最新编出来的，
+/// 也是当前要重点对比的一组），组内按名字倒序，保证每次启动顺序稳定；
+/// 其余仍按抽取的数字序列比较。
 + (NSComparisonResult)compareVersion:(NSString *)a with:(NSString *)b {
+    const BOOL ca = [BenchDecoder isCommitNamedVersion:a];
+    const BOOL cb = [BenchDecoder isCommitNamedVersion:b];
+    if (ca != cb) {
+        return ca ? NSOrderedAscending : NSOrderedDescending;
+    }
+    if (ca && cb) {
+        return [b compare:a];
+    }
+
     NSString *da = [self digitsOf:a];
     NSString *db = [self digitsOf:b];
     if (da.length > 0 && db.length > 0 && ![da isEqualToString:db]) {

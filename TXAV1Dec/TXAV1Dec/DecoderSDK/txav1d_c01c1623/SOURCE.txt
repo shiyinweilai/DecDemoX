@@ -1,0 +1,4 @@
+ref    c01c162
+commit c01c1623970490527aee5c4dca8b3b5e6888772b
+date   2026-11-09
+subject arm64: mc_dotprod: unroll HV/V 8tap loops and load accumulator init values (merge request !123)

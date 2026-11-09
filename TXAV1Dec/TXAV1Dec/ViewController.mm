@@ -1094,19 +1094,11 @@
     config.rounds = (NSUInteger)[self.roundsField integerValueWithFallback:3];
     config.warmupRounds = (NSUInteger)[self.warmupField integerValueWithFallback:1];
     config.skipFrames = (NSUInteger)MAX([self.skipField integerValueWithFallback:0], 0);
-    // 命令行给了线程数就优先用它：自测要扫非档位值（3/6/12）定位线程拐点，
-    // 分段控件只能表达 0/1/2/4/8，反查索引会静默落回默认档。
-    if (self.threadsOverride >= 0) {
-        config.threads = self.threadsOverride;
-    } else {
-        config.threads = [self threadCountFromSegment];
-    }
-    config.schedulePolicy = [self schedulePolicyFromSegment];
-    config.playerCoreThreading =
-        self.threadPolicySegment.segmentedControl.selectedSegmentIndex == 1;
     // 定速设置：分段控件第 0 项是「不定速」，1 是「按码流帧率」，
     // 2 是「自定义帧率」。自定义模式下输入框留空或非正数视为关闭，
     // 否则会传一个 0 fps 给库，那等于每帧都等无限久。
+    // 定速必须先于线程数计算：定速一旦开启，线程数就不再由界面决定，
+    // 而是按解码器族固定（见下面 pacingThreadsForDecoder:）。
     NSInteger pacingIndex = self.pacingSegment.segmentedControl.selectedSegmentIndex;
     if (pacingIndex == 1) {
         config.pacingEnabled = YES;
@@ -1119,6 +1111,26 @@
     } else {
         config.pacingEnabled = NO;
     }
+
+    // 命令行给了线程数就优先用它：自测要扫非档位值（3/6/12）定位线程拐点，
+    // 分段控件只能表达 0/1/2/4/8，反查索引会静默落回默认档。
+    // 定速模式下这条专家通道依然保留：显式传参不会误操作，而「定速下换线程数
+    // 找拐点」本身是有效实验；界面控件置灰拦的是随手点，不拦刻意传参。
+    if (self.threadsOverride >= 0) {
+        config.threads = self.threadsOverride;
+    } else if (config.pacingEnabled) {
+        config.threads = [self pacingThreadsForDecoder:decoder];
+    } else {
+        config.threads = [self threadCountFromSegment];
+    }
+    config.schedulePolicy = [self schedulePolicyFromSegment];
+    // 定速下强制走「解码器能力」口径：dav1d 只有在 capability 且 threads=0 时
+    // 才会落到 n_threads=0（库自己按核心数取满）。若沿用 PlayerCore 口径，
+    // 同一份 threads=0 会被改写成「逻辑核数」直接塞给 dav1d，那是界面替库做了
+    // 决定，和定速要求的「dav1d 用默认」不是一回事。
+    config.playerCoreThreading = config.pacingEnabled
+        ? NO
+        : self.threadPolicySegment.segmentedControl.selectedSegmentIndex == 1;
     // 解码器实例与展示名一起绑定：名称取自实际加载的那个库，
     // 而不是用户填的文本，杜绝"跑 A 标 B"。
     config.decoder = decoder;
@@ -1139,6 +1151,39 @@
     NSArray<NSNumber *> *mapping = @[@0, @1, @2, @4, @8];
     if (index < 0 || index >= (NSInteger)mapping.count) return 0;
     return mapping[index].integerValue;
+}
+
+/**
+ * 定速测试下的线程数：txav1d 固定 2，dav1d 交回库默认（0）。
+ *
+ * 为什么定速要锁死线程数：定速测的是「按目标帧率出帧时谁更省」，
+ * 线程数一变，比较对象就变成了「不同线程配置」，同一批数据不再可比。
+ * 固定成一套值，才能让多个版本在同一起跑线上比。
+ *
+ * 为什么 txav1d 是 2 而不是别的：txav1d 内部对 n_threads 的硬上限就是 2
+ * （get_num_threads 里 imin(n_threads, max_threads_used)），2 是它不做任何
+ * 越权设置时能真实跑满的上限，也对应线上截断后的实际线程数。
+ * bench 层在 threads>0 时会顺带写 reserved[0]=2，但那个值与该库内部上限相等，
+ * 不构成绕过截断，实际线程数仍是线上的 2。
+ *
+ * 为什么 dav1d 是 0：0 在 dav1d 里就是「库自己按核心数取满」，是它的默认行为。
+ * 给定速场景强塞一个具体数字反而偏离默认，和 txav1d 的固定值也不是一回事。
+ * 这条依赖线程口径为「解码器能力」：只有该口径下 dav1d 分支才会在 threads=0 时
+ * 完全不动 n_threads，把决定权留给库（见 buildConfig 里定速强制 capability）。
+ */
+- (NSInteger)pacingThreadsForDecoder:(BenchDecoder *)decoder {
+    return [self isTxav1dDecoder:decoder] ? 2 : 0;
+}
+
+/**
+ * 判断解码器是否属于 txav1d 族。
+ *
+ * 用版本目录名的前缀而不是库自报版本比较：dav1d 兼容层与 txav1d 自报的版本串
+ * 完全可能相同（都叫 1.5.4），只有目录名能区分两族。目录名由构建脚本按
+ * 「txav1d<版本>」「dav1d<版本>」生成，是这里唯一可靠的族标识。
+ */
+- (BOOL)isTxav1dDecoder:(BenchDecoder *)decoder {
+    return [decoder.version.lowercaseString hasPrefix:@"txav1d"];
 }
 
 - (BenchSchedulePolicy)schedulePolicyFromSegment {
@@ -1175,6 +1220,36 @@
     const BOOL custom = self.pacingSegment.segmentedControl.selectedSegmentIndex == 2;
     self.pacingField.textField.enabled = custom && !running;
     self.pacingField.alpha = custom ? 1.0 : 0.4;
+    [self refreshThreadControlsWithRunning:running];
+}
+
+/**
+ * 定速时锁定线程相关控件，并在标题上写明实际取值。
+ *
+ * 定速一开，线程数就由 pacingThreadsForDecoder 按解码器族固定，界面上的
+ * 「解码线程」「线程口径」两项不再影响结果。留着可点会有两种坏处：
+ * 点了没反应会让人以为控件坏了；更糟的是看起来生效了，实际数据却是固定值，
+ * 排查时会被自己的界面误导。所以直接置灰。
+ *
+ * 置灰而不是隐藏：隐藏会让表单高度在切换定速档位时整体跳动，
+ * 而且用户看不出「这里本来有个选项、只是定速时不用选」。
+ * 标题后缀说明当前生效值，让置灰的控件仍能提供信息。
+ */
+- (void)refreshThreadControlsWithRunning:(BOOL)running {
+    const BOOL pacing = self.pacingSegment.segmentedControl.selectedSegmentIndex != 0;
+    self.threadSegment.segmentedControl.enabled = !running && !pacing;
+    self.threadPolicySegment.segmentedControl.enabled = !running && !pacing;
+    self.threadSegment.alpha = pacing ? 0.4 : 1.0;
+    self.threadPolicySegment.alpha = pacing ? 0.4 : 1.0;
+
+    // 标题反映当前是否被定速接管。定速下两个族取值不同，
+    // 所以只能说明规则而不是给一个统一数字，避免与 dav1d 的实际行为冲突。
+    self.threadSegment.titleLabel.text = pacing
+        ? @"解码线程（定速固定）"
+        : @"解码线程";
+    self.threadPolicySegment.titleLabel.text = pacing
+        ? @"线程口径（定速固定）"
+        : @"线程口径";
 }
 
 /**
@@ -1275,13 +1350,12 @@
                                        self.pacingField]) {
         field.textField.enabled = !running;
     }
-    self.threadSegment.segmentedControl.enabled = !running;
-    self.threadPolicySegment.segmentedControl.enabled = !running;
     self.affinitySegment.segmentedControl.enabled = !running;
     self.pacingSegment.segmentedControl.enabled = !running;
-    // 帧率框还受「指定帧率」档位约束，交给同一个方法统一判断，
-    // 避免两处写死可编辑条件后不同步。这里传入本次的 running 而不是读
-    // engine.isRunning：后者在开跑瞬间可能还没更新，会让框短暂可编辑。
+    // 线程两项的可编辑性不止取决于 running：定速档下它们被固定值接管，
+    // 无论是否在跑都不该可点。统一交给联动方法判断，避免这里无条件启用后
+    // 把定速期间的置灰状态覆盖掉。
+    // 帧率框还受「指定帧率」档位约束，也由同一个方法处理。
     [self refreshPacingFieldAvailabilityWithRunning:running];
     self.decoderPickerRow.button.enabled = !running;
     self.streamPickerRow.button.enabled = !running;
@@ -1669,11 +1743,24 @@ static id BenchJSONString(NSString *value) {
     config[@"threads"] = BenchJSONInteger((NSUInteger)MAX(cfg.threads, 0));
     config[@"threads_mode"] = cfg.threads > 0 ? @"manual" : @"auto";
     config[@"thread_policy"] = cfg.playerCoreThreading ? @"playercore" : @"capability";
-    config[@"thread_policy_note"] = cfg.playerCoreThreading
-        ? (cfg.threads > 0
-            ? @"对齐 PlayerCore（手动线程）：复刻封装公式，txav1d 写 reserved[0]，两个解码器线程数一致生效"
-            : @"对齐 PlayerCore（自动）：复刻 FFmpeg libtxav1d/libdav1d 封装，txav1d 不写 reserved[0]，按线上截断，取 CPU 核数")
-        : @"解码器能力：txav1d 写 reserved[0]，填几个线程就真跑几个，用于线程扩展性对比";
+    // 定速下线程数由解码器族固定，界面上的选择不生效。必须单独标注出来：
+    // 否则事后看报告只会看到「threads: 2、mode: manual」，误以为是当时手选的 2，
+    // 下次复现时按手选配置搭环境，却得不到同样的数字。
+    if (cfg.pacingEnabled) {
+        config[@"threads_mode"] = @"pacing_fixed";
+        config[@"threads_note"] = cfg.threads > 0
+            ? @"定速测试：txav1d 固定 2 线程（等于该库内部线程上限，对应线上截断后的实际线程数），界面线程选择不生效"
+            : @"定速测试：dav1d 交回库默认（n_threads=0，按核心数取满），界面线程选择不生效";
+    } else {
+        config[@"threads_note"] = [NSNull null];
+    }
+    config[@"thread_policy_note"] = cfg.pacingEnabled
+        ? @"定速测试强制使用解码器能力口径：dav1d 在 threads=0 时才会把线程决定权完全交回库，PlayerCore 口径会改写该值"
+        : (cfg.playerCoreThreading
+            ? (cfg.threads > 0
+                ? @"对齐 PlayerCore（手动线程）：复刻封装公式，txav1d 写 reserved[0]，两个解码器线程数一致生效"
+                : @"对齐 PlayerCore（自动）：复刻 FFmpeg libtxav1d/libdav1d 封装，txav1d 不写 reserved[0]，按线上截断，取 CPU 核数")
+            : @"解码器能力：txav1d 写 reserved[0]，填几个线程就真跑几个，用于线程扩展性对比");
     config[@"schedule_policy"] = BenchJSONString(
         [BenchSystemMetrics schedulePolicyName:cfg.schedulePolicy]);
     config[@"schedule_policy_note"] = BenchJSONString(
@@ -2109,9 +2196,39 @@ static id BenchJSONString(NSString *value) {
         append(@"已全选 %lu 个码流", (unsigned long)self.selectedStreams.count);
     }
 
+    // --decoders <版本1,版本2,...>：从「提前编译好存着的」多版本 dylib 里挑出指定子集。
+    // 版本号取自 dylib 文件名（scanDecoders 里 decoder.version），与前端配置里勾选的名字一致。
+    // 未指定、或 --all-decoders 时全选；指定后只跑这批，方便 UI 选中几个解码器直接对比。
+    NSUInteger decIdx = [[NSProcessInfo processInfo].arguments indexOfObject:@"--decoders"];
+    if (decIdx != NSNotFound && decIdx + 1 < cliArgs.count) {
+        NSArray<NSString *> *wanted = [cliArgs[decIdx + 1] componentsSeparatedByString:@","];
+        NSMutableArray<BenchDecoder *> *pickedDec = [NSMutableArray array];
+        for (NSString *w in wanted) {
+            NSString *key = [w stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+            if (key.length == 0) continue;
+            for (BenchDecoder *decoder in self.decoders) {
+                if ([decoder.version isEqualToString:key] && ![pickedDec containsObject:decoder]) {
+                    [pickedDec addObject:decoder];
+                    break;
+                }
+            }
+        }
+        if (pickedDec.count > 0) {
+            self.selectedDecoders = pickedDec;
+            [self refreshDecoderPickerDisplay];
+            append(@"已按 --decoders 选中 %lu 个解码器：%@",
+                   (unsigned long)pickedDec.count,
+                   [[pickedDec valueForKey:@"version"] componentsJoinedByString:@", "]);
+        } else {
+            append(@"警告：--decoders %@ 没匹配到任何已编译版本，沿用默认选择", cliArgs[decIdx + 1]);
+        }
+    }
+
     // --all-decoders 用来验证多版本同测这条新路径：
     // 一个 App 内同时加载多个 dylib，逐一跑同一码流并出对比表。
-    if ([[NSProcessInfo processInfo].arguments containsObject:@"--all-decoders"]) {
+    // 仅当没有用 --decoders 指定子集时才全选，避免覆盖用户的选择。
+    if (![[NSProcessInfo processInfo].arguments containsObject:@"--decoders"] &&
+        [[NSProcessInfo processInfo].arguments containsObject:@"--all-decoders"]) {
         [self.selectedDecoders removeAllObjects];
         for (BenchDecoder *decoder in self.decoders) {
             // 这里不能再用 isUsable 过滤：扫描阶段没有 dlopen，全部都是未加载状态。
@@ -2213,22 +2330,32 @@ static id BenchJSONString(NSString *value) {
     [self refreshPacingFieldAvailabilityWithRunning:NO];
 
     append(@"调度策略：%@", [BenchSystemMetrics schedulePolicyName:[self schedulePolicyFromSegment]]);
-    append(@"线程口径：%@",
-           self.threadPolicySegment.segmentedControl.selectedSegmentIndex == 1
-               ? @"对齐 PlayerCore" : @"解码器能力");
-    // 0 是「自动」而不是「指定 0 个线程」：配置层把 0 解释为让库按核心数取满。
-    // 这里按最终生效值报告，并区分来源是命令行还是界面，避免日志与实际传参不符。
-    const NSInteger effectiveThreads = self.threadsOverride >= 0
-        ? self.threadsOverride
-        : [self threadCountFromSegment];
-    if (self.threadsOverride >= 0) {
-        append(@"线程数：%ld（命令行指定）", (long)effectiveThreads);
-    } else if (effectiveThreads > 0) {
-        append(@"线程数：%ld（界面选择）", (long)effectiveThreads);
-    } else {
-        append(@"线程数：自动（界面选择，按逻辑核数取满）");
-    }
     NSInteger pacingMode = self.pacingSegment.segmentedControl.selectedSegmentIndex;
+    // 定速下线程数与口径都被规则接管，日志必须如实反映这一点：
+    // 若照旧打印「界面选择」，看日志的人会以为手动选择起了作用，
+    // 进而怀疑固定规则没生效。
+    const BOOL pacingActive = pacingMode != 0;
+    append(@"线程口径：%@",
+           pacingActive
+               ? @"解码器能力（定速强制，忽略界面选择）"
+               : (self.threadPolicySegment.segmentedControl.selectedSegmentIndex == 1
+                   ? @"对齐 PlayerCore" : @"解码器能力"));
+    if (pacingActive && self.threadsOverride < 0) {
+        append(@"线程数：定速固定（txav1d = 2，dav1d = 库默认），界面选择不生效");
+    } else {
+        // 0 是「自动」而不是「指定 0 个线程」：配置层把 0 解释为让库按核心数取满。
+        // 这里按最终生效值报告，并区分来源是命令行还是界面，避免日志与实际传参不符。
+        const NSInteger effectiveThreads = self.threadsOverride >= 0
+            ? self.threadsOverride
+            : [self threadCountFromSegment];
+        if (self.threadsOverride >= 0) {
+            append(@"线程数：%ld（命令行指定）", (long)effectiveThreads);
+        } else if (effectiveThreads > 0) {
+            append(@"线程数：%ld（界面选择）", (long)effectiveThreads);
+        } else {
+            append(@"线程数：自动（界面选择，按逻辑核数取满）");
+        }
+    }
     if (pacingMode == 2) {
         append(@"定速：指定 %@ fps（界面选择）", self.pacingField.textField.text);
     } else if (pacingMode == 1) {

@@ -122,6 +122,12 @@ for version_dir in "${SDK_DIR}"/*/; do
 
   compact_header="$(printf '%s' "${header_ver}" | tr -d '.')"
   case "${version}" in
+    # commit 命名（txav1d_4fe45527）：此时目录的身份是提交而不是版本号。
+    # txav1d 仓库的版本宏长期停在 1.4.3 不跟提交走，几个相邻提交往往共用
+    # 同一个版本串，用版本号反查目录必然失配，因此这类目录跳过数字比对，
+    # 改由下面的「头文件声明 vs 静态库内嵌串」一致性来拦真正的错配。
+    # SOURCE.txt 记录该目录对应的完整 commit，用于人工追溯。
+    *_*[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
     *"${compact_header}") ;;
     *)
       echo "error: 版本不一致 —— 目录为 ${version}，但头文件声明 ${header_ver}"
